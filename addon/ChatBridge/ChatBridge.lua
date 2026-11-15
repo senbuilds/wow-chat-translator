@@ -10,7 +10,7 @@
 ChatBridge = {}
 local CB = ChatBridge
 
-CB.VERSION = "2.2"
+CB.VERSION = "2.3"
 CB.COLS, CB.ROWS, CB.CELL, CB.HEADER = 64, 8, 4, 8
 CB.MAX_PAYLOAD = math.floor((CB.COLS * CB.ROWS - CB.HEADER) * 6 / 8) - 5
 CB.HOLD = 0.25          -- 每条消息的色块显示秒数
@@ -323,8 +323,9 @@ function CB.PageRect()
     local left, top, width, height = panel:GetLeft(), panel:GetTop(), panel:GetWidth(), panel:GetHeight()
     if not (left and top and width and height and physicalHeight) then return "0" end
     local k = panel:GetEffectiveScale() * physicalHeight / 768
-    return string.format("1,%d,%d,%d,%d", floor(left * k + 0.5), floor(physicalHeight - top * k + 0.5),
-        floor(width * k + 0.5), floor((height - GRIP - (usageMode and INPUT or 0)) * k + 0.5))
+    return string.format("1,%d,%d,%d,%d,%d,%d", floor(left * k + 0.5), floor(physicalHeight - top * k + 0.5),
+        floor(width * k + 0.5), floor((height - GRIP - (usageMode and INPUT or 0)) * k + 0.5),
+        floor((height - GRIP) * k + 0.5), floor(GRIP * k + 0.5))
 end
 
 local lastRectAt = -100
@@ -461,13 +462,14 @@ local function buildPage()
     bar:SetPoint("BOTTOMLEFT")
     bar:SetPoint("BOTTOMRIGHT")
     bar:SetHeight(GRIP)
-    bar:SetColorTexture(0.10, 0.12, 0.16, 0.85)
+    bar:SetColorTexture(0.10, 0.12, 0.16, 1)        -- 不透明：小程序用同色遮片盖住提示
     local note = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     note:SetPoint("LEFT", bar, "LEFT", 20, 0)
     note:SetPoint("RIGHT", bar, "RIGHT", -46, 0)
     note:SetJustifyH("LEFT")
     note:SetWordWrap(false)
-    note:SetText("看不到译文：打开桌面「魔兽聊天翻译」点启动")
+    -- 这句提示一直画着，但翻译程序开着时会被它的同色遮片盖住，所以只有程序没开时才看得见
+    note:SetText("翻译程序没开：打开桌面「魔兽聊天翻译」点启动")
 
     -- 滚轮翻看之前的译文（译文由小程序显示，这里把滚动转给它）
     panel:EnableMouseWheel(true)

@@ -416,6 +416,7 @@ def press_ctrl_v():
 # ---------------------------------------------------------------------------
 
 BG, BG_BAR = "#0f1115", "#1e2128"
+GAME_BAR = "#1a1f29"            # 游戏里翻译页底条的颜色（插件里 0.10, 0.12, 0.16），遮提示用
 FG, FG_DIM, ACCENT = "#e8e8ea", "#8a8f99", "#66ccff"
 GWL_EXSTYLE, WS_EX_TRANSPARENT, WS_EX_NOACTIVATE = -20, 0x20, 0x08000000
 user32.GetAncestor.restype = wt.HWND
@@ -465,6 +466,8 @@ class Overlay:
             w.bind("<B1-Motion>", self._drag_move)
             w.bind("<ButtonRelease-1>", lambda e: self._remember_geometry())
 
+        # 贴合时盖住游戏底条上「翻译程序没开」那句提示：程序开着，提示就看不见
+        self.hint_cover = tk.Frame(root, bg=GAME_BAR, highlightthickness=0, bd=0)
         self.grip = tk.Label(root, text="◢", bg=BG, fg="#4a4f59", font=(FONT, 8), cursor="size_nw_se")
         self.grip.bind("<Button-1>", self._resize_start)
         self.grip.bind("<B1-Motion>", self._resize_move)
@@ -519,11 +522,11 @@ class Overlay:
             return
         self.docked = docked
         self.placed = None
-        for w in (self.bar, self.grip, self.log, self.usage_view):
+        for w in (self.bar, self.grip, self.log, self.usage_view, self.hint_cover):
             w.pack_forget()
             w.place_forget()
         if docked:
-            (self.usage_view if self.usage_on else self.log).pack(fill="both", expand=True)
+            # 贴合模式用 place 摆：内容区在上，底条那一行只放遮片，其余透明（_place 里按插件发来的尺寸摆）
             self.root.attributes("-alpha", 1.0)
             self.root.attributes("-transparentcolor", BG)   # 背景透明：底下是游戏里画的半透明底板
             self.root.withdraw()            # 等 _place 算好位置再显示
@@ -551,12 +554,28 @@ class Overlay:
             want = None
             if self.dock and self.dock[0] and origin and self._game_in_front():
                 pad = int(self.cfg.get("dock_inset", 2))
-                _, x, y, w, h = self.dock
-                want = "%dx%d+%d+%d" % (max(40, w - 2 * pad), max(30, h - 2 * pad),
-                                        origin[0] + x + pad, origin[1] + y + pad)
+                _, x, y, w, h = self.dock[:5]
+                width, content = max(40, w - 2 * pad), max(30, h - 2 * pad)
+                height, cover = content, None
+                if len(self.dock) >= 7 and self.dock[6] > 0:
+                    bar_top, bar_h = self.dock[5], self.dock[6]
+                    k = bar_h / 16.0                 # 插件底条高 16 个界面单位
+                    left, right = int(round(18 * k)), w - int(round(46 * k))   # 避开左边缩放角标和右边「用量」
+                    height = bar_top + bar_h - pad
+                    if right > left:
+                        cover = (left - pad, bar_top - pad, right - left, bar_h)
+                want = "%dx%d+%d+%d" % (width, height, origin[0] + x + pad, origin[1] + y + pad)
+                layout = (width, content, cover)
             if want != self.placed:
                 self.placed = want
                 if want:
+                    view = self.usage_view if self.usage_on else self.log
+                    view.place(x=0, y=0, width=layout[0], height=layout[1])
+                    if layout[2]:
+                        cx, cy, cw, ch = layout[2]
+                        self.hint_cover.place(x=cx, y=cy, width=cw, height=ch)
+                    else:
+                        self.hint_cover.place_forget()
                     self.root.geometry(want)
                     self.root.deiconify()
                     self.root.attributes("-topmost", True)
@@ -664,8 +683,8 @@ class Overlay:
     def _on_dock(self, spec):
         """插件发来翻译页的位置："1,左,上,宽,高" 或 "0"（没显示）。"""
         nums = [int(n) for n in spec.split(",") if n.strip().lstrip("-").isdigit()]
-        if len(nums) == 5 and nums[0] == 1 and nums[3] > 0 and nums[4] > 0:
-            self.dock = [True] + nums[1:]
+        if len(nums) in (5, 7) and nums[0] == 1 and nums[3] > 0 and nums[4] > 0:
+            self.dock = [True] + nums[1:]       # 新插件多带：底条顶边位置、底条高度
         elif self.dock:
             self.dock = [False] + list(self.dock[1:])
         else:
@@ -876,8 +895,12 @@ class Overlay:
             return
         self.usage_on = on
         old, new = (self.log, self.usage_view) if on else (self.usage_view, self.log)
-        old.pack_forget()
-        new.pack(fill="both", expand=True, side="top")
+        if self.docked:
+            old.place_forget()
+            self.placed = "?"           # 让 _place 按当前尺寸把新的那页摆上
+        else:
+            old.pack_forget()
+            new.pack(fill="both", expand=True, side="top")
         if on:
             self.redeem_note = None
             self._render_usage()

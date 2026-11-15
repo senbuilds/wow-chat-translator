@@ -154,10 +154,10 @@ def main():
     toggle = lua.eval("ChatBridge.TogglePage")
     toggle()
     pump(0.8)
-    assert seen[-1][1] == b"W\t1,11,743,450,207\t", seen[-1]
+    assert seen[-1][1] == b"W\t1,11,743,450,207,207,18\t", seen[-1]
     lua.execute(b'for _, f in ipairs(frames) do if f.name == "ChatBridgePanel" then f.l = 110 end end')
     pump(1.0)
-    assert seen[-1][1] == b"W\t1,124,743,450,207\t", seen[-1]
+    assert seen[-1][1] == b"W\t1,124,743,450,207,207,18\t", seen[-1]
     n = len(seen)
     pump(1.5)
     assert len(seen) == n, "位置没变就不该重复发"
@@ -275,7 +275,7 @@ def main():
     lua.eval("ChatBridge.RequestUsage")()
     pump(1.5)
     got = [p for _, p in seen[before:]]
-    assert b"U\t1\t" in got and got[-1] == b"W\t1,124,743,450,178\t", got
+    assert b"U\t1\t" in got and got[-1] == b"W\t1,124,743,450,178,207,18\t", got
     # 兑换：输入框里的 CDK（去掉空格）交给小程序，输入框清空；空的不发
     lua.execute(b"""
         for _, f in ipairs(frames) do
@@ -296,7 +296,7 @@ def main():
     lua.eval("ChatBridge.RequestUsage")()
     pump(1.5)
     got = [p for _, p in seen[before:]]
-    assert b"U\t0\t" in got and got[-1] == b"W\t1,124,743,450,207\t", got
+    assert b"U\t0\t" in got and got[-1] == b"W\t1,124,743,450,207,207,18\t", got
     lua.eval("ChatBridge.ResetLayout")()
     assert lua.eval("ChatBridgeDB.panelBox") is None
 
