@@ -1,4 +1,9 @@
-# 魔兽聊天翻译（WoW Chat Translator）
+# 魔兽聊天翻译（WoW Chat Translator）· 魔兽世界翻译插件
+
+**World of Warcraft chat translator (English ⇄ Chinese) for WoW Forever / US servers** — 魔兽世界美服 / 魔兽世界「无限」聊天实时翻译插件。
+
+官网与下载：<https://wow.husen.ca> · 教程：[安装](https://wow.husen.ca/guide/install.html) ·
+[免费接 Gemini](https://wow.husen.ca/guide/free-gemini.html) · [魔兽黑话缩写大全](https://wow.husen.ca/guide/wow-slang.html)
 
 打美服听不懂队友？这个小工具把队友的英文聊天实时翻成中文，直接显示在游戏聊天框旁的「翻译」页里；
 你打中文按 `Ctrl+T`，英文自动填回聊天框，回车发送。支持魔兽世界「无限」（Interface 16001）。
