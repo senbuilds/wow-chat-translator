@@ -324,6 +324,20 @@ class Relay:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
 
+    def per_line(self):
+        """一条聊天大约花多少（线上服务公布的典型值）。拿不到就用默认值。"""
+        if getattr(self, "_per_line", None):
+            return self._per_line
+        try:
+            with urllib.request.urlopen(self.cfg["endpoint"].rstrip("/") + "/shop", timeout=5) as r:
+                value = float(json.loads(r.read().decode("utf-8")).get("per_translation") or 0)
+            if value > 0:
+                self._per_line = value
+                return value
+        except Exception:
+            pass
+        return 0.00026
+
     def healthy(self):
         if self.own:
             return True             # 自带模型：能不能用看翻译结果，不去探线上服务
@@ -500,6 +514,8 @@ class Overlay:
         self.capture.start()
         threading.Thread(target=self._translate_loop, daemon=True).start()
         threading.Thread(target=self._health_loop, daemon=True).start()
+        self.per_line = None
+        threading.Thread(target=lambda: setattr(self, "per_line", self.relay.per_line()), daemon=True).start()
         root.after(300, lambda: self._append(
             [("等待游戏里的聊天… 发消息：游戏聊天框里打中文，按 Ctrl+T。", "note")]))
         root.after(50, self._pump)
@@ -770,7 +786,7 @@ class Overlay:
         if self.no_balance_told:
             return
         self.no_balance_told = True
-        self._append([("额度用完了，现在只显示原文。点翻译页右下角的「用量」，输入 CDK 兑换。", "warn")])
+        self._append([("额度用完了，现在只显示原文。请在电脑桌面的「魔兽聊天翻译」启动器里处理。", "warn")])
 
     def _open_account(self):
         if self.account_win is not None and self.account_win.winfo_exists():
@@ -853,7 +869,7 @@ class Overlay:
             self.no_balance_told = False
             self.redeem_note = ("兑换成功：+%s%.2f，余额 %s%.2f" % (
                 result.get("currency", "US$"), result["added"], self.relay.currency, self.relay.balance), "good")
-            self._append([("兑换成功，余额 %s%.2f，翻译已恢复。" % (self.relay.currency, self.relay.balance), "note")])
+            self._append([("额度已更新，翻译恢复了。", "note")])
         else:
             self.redeem_note = ("兑换失败：%s" % err, "bad")
             if not self.usage_on:
@@ -909,47 +925,43 @@ class Overlay:
             self.log.see("end")
 
     def _render_usage(self):
-        """画用量页：还剩多少钱；用了多少钱（今日、累计、平均每日）；最近一次兑换结果。
-        CDK 输入框在游戏里，这页的正下方。"""
+        """画游戏里的用量页：还能翻多少条；用了多少条（今日、累计、平均每日）。
+        按暴雪插件政策，游戏里不出现金额、价格、充值和兑换——这些都在电脑上的启动器里做。"""
         v, rep, r = self.usage_view, self.usage_report, self.relay
         spend = (rep or {}).get("spend")
-        cur = (spend or {}).get("currency") or r.currency
+        per = self.per_line or 0.00026
 
-        def money(x):
-            # 金额很小时多留两位小数，不然全是 0.00
-            return "%s%.2f" % (cur, x) if x == 0 or x >= 1 else "%s%.4f" % (cur, x)
+        def lines(amount):
+            n = int(max(amount, 0) / per)
+            return "约 {:,} 条".format(n) if n >= 10 else ("不到 10 条" if amount > 0 else "0 条")
 
         v.configure(state="normal")
         v.delete("1.0", "end")
-        v.insert("end", "还剩\n", "dim")
+        v.insert("end", "还能翻\n", "dim")
         if r.own:
             v.insert("end", "自带模型\n", ("big", "good"))
         elif r.unlimited:
-            v.insert("end", "不限额\n", ("big", "good"))
+            v.insert("end", "不限量\n", ("big", "good"))
         elif r.balance is None:
             v.insert("end", ("查不到：%s\n" % self.usage_error) if self.usage_error else "查询中…\n",
                      "bad" if self.usage_error else "big")
         else:
-            # 余额向下取到分：花掉一点点之后不该还显示成整数
-            left = int(max(r.balance, 0) * 100) / 100
-            v.insert("end", "%s%.2f\n" % (r.currency, left), ("big", "bad" if r.balance <= 0 else "good"))
-        if self.redeem_note:
-            v.insert("end", self.redeem_note[0] + "\n", self.redeem_note[1])
-        v.insert("end", "已用\n", "dim")
-        if spend:
-            v.insert("end", "今日 %s\n" % money(spend["today"]))
-            v.insert("end", "累计 %s" % money(spend["total"]))
+            v.insert("end", lines(r.balance) + "\n", ("big", "bad" if r.balance <= 0 else "good"))
+        v.insert("end", "已翻\n", "dim")
+        if spend and not r.own:
+            v.insert("end", "今日 %s\n" % lines(spend["today"]))
+            v.insert("end", "累计 %s" % lines(spend["total"]))
             v.insert("end", "  （%d 天）\n" % spend["days"], "dim")
-            v.insert("end", "平均每日 %s\n" % money(spend["daily_avg"]))
+            v.insert("end", "平均每日 %s\n" % lines(spend["daily_avg"]))
+        elif r.own:
+            v.insert("end", "自带模型不记录用量\n", "dim")
         else:
             v.insert("end", ("查不到：%s\n" % self.usage_error) if self.usage_error else "查询中…\n",
                      "bad" if self.usage_error else ())
         if r.own:
-            v.insert("end", "翻译直接发到你自己填的模型，不经过线上服务、不扣额度。换回线上服务：在启动器的「自带模型」里关掉。", "dim")
-        elif r.unlimited:
-            v.insert("end", "你用的是不限额口令，不会真的扣费；上面是按单价折算的金额。", "dim")
-        else:
-            v.insert("end", "在下面的输入框粘贴 CDK，回车或点「兑换」。", "dim")
+            v.insert("end", "翻译直接发到你自己填的模型，不经过线上服务。换回线上服务：在电脑上的启动器里关掉「自带模型」。", "dim")
+        elif not r.unlimited:
+            v.insert("end", "额度和设备编号在电脑桌面的「魔兽聊天翻译」启动器里管理。", "dim")
         v.configure(state="disabled")
 
     def _show_usage(self, report, err):

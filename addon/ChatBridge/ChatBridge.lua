@@ -10,7 +10,7 @@
 ChatBridge = {}
 local CB = ChatBridge
 
-CB.VERSION = "2.3"
+CB.VERSION = "2.4"
 CB.COLS, CB.ROWS, CB.CELL, CB.HEADER = 64, 8, 4, 8
 CB.MAX_PAYLOAD = math.floor((CB.COLS * CB.ROWS - CB.HEADER) * 6 / 8) - 5
 CB.HOLD = 0.25          -- 每条消息的色块显示秒数
@@ -311,9 +311,9 @@ end
 
 local panel, pageButton, unread, lastRect, rectTimer = nil, nil, 0, nil, 0
 local dragging = false   -- 拖动或缩放期间让小程序先把译文藏起来，松手后再按新位置显示
-local usageMode = false  -- 翻译页当前显示的是「用量与兑换」而不是聊天译文
-local INPUT = 26         -- 用量页里 CDK 输入那一行的高度（小程序不盖这一行）
-local usageButtonLabel, redeemRow, redeemBox = nil, nil, nil
+local usageMode = false  -- 翻译页当前显示的是「用量」而不是聊天译文
+-- 游戏里不放任何付费相关的东西（暴雪插件政策）：充值、兑换只在电脑上的启动器里做
+local usageButtonLabel = nil
 local GRIP = 16      -- 底板最下面留一条：拖动条 + 右下角缩放角标（小程序不盖这一条）
 
 -- 内容区在游戏窗口里的物理像素矩形："1,左,上,宽,高"；没显示时是 "0"
@@ -324,7 +324,7 @@ function CB.PageRect()
     if not (left and top and width and height and physicalHeight) then return "0" end
     local k = panel:GetEffectiveScale() * physicalHeight / 768
     return string.format("1,%d,%d,%d,%d,%d,%d", floor(left * k + 0.5), floor(physicalHeight - top * k + 0.5),
-        floor(width * k + 0.5), floor((height - GRIP - (usageMode and INPUT or 0)) * k + 0.5),
+        floor(width * k + 0.5), floor((height - GRIP) * k + 0.5),
         floor((height - GRIP) * k + 0.5), floor(GRIP * k + 0.5))
 end
 
@@ -358,15 +358,11 @@ function CB.TogglePage(show)
     sendRect(true)
 end
 
--- 在「聊天译文」和「用量与兑换」两页之间切换。用量数字由小程序画在上半部分，
--- CDK 输入框是游戏里的真输入框，在最下面一行。
+-- 在「聊天译文」和「用量」两页之间切换。用量内容由小程序画（只显示还能翻多少条）
 function CB.SetUsageMode(on)
     if not panel then return end
     usageMode = on and true or false
     if usageMode and not panel:IsShown() then CB.TogglePage(true) end
-    if redeemRow then
-        if usageMode then redeemRow:Show() else redeemRow:Hide(); redeemBox:ClearFocus() end
-    end
     if usageButtonLabel then usageButtonLabel:SetText(usageMode and "返回" or "用量") end
     CB.Enqueue("U\t" .. (usageMode and "1" or "0") .. "\t")
     sendRect(true)
@@ -374,17 +370,6 @@ end
 
 function CB.RequestUsage()
     CB.SetUsageMode(not usageMode)
-end
-
--- 把输入框里的 CDK 交给小程序去兑换
-function CB.Redeem()
-    if not redeemBox then return end
-    local code = redeemBox:GetText() or ""
-    code = code:gsub("%s+", "")
-    if code == "" then return end
-    CB.Enqueue("K\t\t" .. code)
-    redeemBox:SetText("")
-    redeemBox:ClearFocus()
 end
 
 -- 记住一个框体现在的位置（和大小），并改成只用一个锚点固定，之后才能自由拖动和缩放
@@ -487,46 +472,6 @@ local function buildPage()
     usageButtonLabel = usageLabel
     usage:SetScript("OnClick", function() CB.RequestUsage() end)
 
-    -- 用量页最下面的 CDK 兑换行：一个输入框 + 「兑换」按钮，只在用量页显示
-    redeemRow = CreateFrame("Frame", nil, panel)
-    redeemRow:SetPoint("BOTTOMLEFT", 0, GRIP)
-    redeemRow:SetPoint("BOTTOMRIGHT", 0, GRIP)
-    redeemRow:SetHeight(INPUT)
-    local rowBg = redeemRow:CreateTexture(nil, "BORDER")
-    rowBg:SetAllPoints(redeemRow)
-    rowBg:SetColorTexture(0.09, 0.10, 0.13, 1)
-    local rowLabel = redeemRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    rowLabel:SetPoint("LEFT", 8, 0)
-    rowLabel:SetText("CDK")
-
-    local go = CreateFrame("Button", nil, redeemRow)
-    go:SetSize(48, INPUT - 8)
-    go:SetPoint("RIGHT", -6, 0)
-    local goBg = go:CreateTexture(nil, "BACKGROUND")
-    goBg:SetAllPoints(go)
-    goBg:SetColorTexture(0.16, 0.42, 0.62, 1)
-    local goHover = go:CreateTexture(nil, "HIGHLIGHT")
-    goHover:SetAllPoints(go)
-    goHover:SetColorTexture(1, 1, 1, 0.15)
-    local goLabel = go:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    goLabel:SetPoint("CENTER")
-    goLabel:SetText("兑换")
-    go:SetScript("OnClick", function() CB.Redeem() end)
-
-    redeemBox = CreateFrame("EditBox", "ChatBridgeRedeemBox", redeemRow)
-    redeemBox:SetPoint("LEFT", rowLabel, "RIGHT", 8, 0)
-    redeemBox:SetPoint("RIGHT", go, "LEFT", -8, 0)
-    redeemBox:SetHeight(INPUT - 8)
-    redeemBox:SetAutoFocus(false)
-    redeemBox:SetMaxLetters(40)
-    redeemBox:SetFontObject(ChatFontNormal or GameFontHighlightSmall)
-    redeemBox:SetTextInsets(6, 6, 0, 0)
-    local boxBg = redeemBox:CreateTexture(nil, "BACKGROUND")
-    boxBg:SetAllPoints(redeemBox)
-    boxBg:SetColorTexture(0.16, 0.18, 0.22, 1)
-    redeemBox:SetScript("OnEnterPressed", function() CB.Redeem() end)
-    redeemBox:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    redeemRow:Hide()
 
     local grip = CreateFrame("Button", nil, panel)
     grip:SetSize(GRIP, GRIP)
@@ -811,7 +756,7 @@ SlashCmdList.CHATBRIDGE = function(msg)
         CB.RequestUsage()
     elseif msg == "account" then
         CB.Enqueue("A\t\t")
-        print(PREFIX .. "已让电脑上的翻译小程序打开设备编号窗口（切出游戏看，换电脑找回余额用）。")
+        print(PREFIX .. "已让电脑上的翻译小程序打开设备编号窗口（切出游戏看）。")
     elseif msg == "reset" then
         CB.ResetLayout()
         print(PREFIX .. "按钮和翻译页已放回默认位置。")

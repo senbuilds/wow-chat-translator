@@ -311,7 +311,7 @@ class Launcher:
         self.cdk.bind("<Return>", lambda e: self.redeem())
         self.redeem_button = WowButton(row, "兑换 CDK", self.redeem, width=9)
         self.redeem_button.pack(side="right", padx=(8, 0))
-        self.cdk_msg = tk.Label(p, text="在上面粘贴 CDK 后点「兑换」。游戏里翻译页的「用量」也能兑换。", bg=PANEL, fg=DIM,
+        self.cdk_msg = tk.Label(p, text="在上面粘贴兑换码后点「兑换」。游戏里翻译页的「用量」能看到还能翻多少条。", bg=PANEL, fg=DIM,
                                 font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
         self.cdk_msg.pack(fill="x", pady=(6, 0))
         row = tk.Frame(p, bg=PANEL)
@@ -788,6 +788,7 @@ class Launcher:
                     self.redeem_button.set(enabled=True)
                     if result:
                         self.cdk.delete(0, "end")
+                        self.restart_overlay()      # 翻译在跑的话重启一下：它记着「额度用完了」，要重新查
                         self.cdk_msg.configure(text="兑换成功：+%s%.2f" % (result.get("currency", "US$"), result["added"]), fg=GOOD)
                     else:
                         self.cdk_msg.configure(text="兑换失败：%s" % err, fg=BAD)

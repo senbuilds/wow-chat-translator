@@ -270,28 +270,15 @@ def main():
     got = [p.decode() for _, p in seen[before:]]
     assert got == ["Q\t\t治疗没蓝了，等一下再拉", "Q\t\t谢谢大家", "Q\t\t打得好"], got
 
-    # 用量页：点「用量」切过去（翻译页自动打开，内容区让出 CDK 输入行），再点切回来
+    # 用量页：点「用量」切过去（翻译页自动打开，内容区大小不变），再点切回来
     before = len(seen)
     lua.eval("ChatBridge.RequestUsage")()
     pump(1.5)
     got = [p for _, p in seen[before:]]
-    assert b"U\t1\t" in got and got[-1] == b"W\t1,124,743,450,178,207,18\t", got
-    # 兑换：输入框里的 CDK（去掉空格）交给小程序，输入框清空；空的不发
-    lua.execute(b"""
-        for _, f in ipairs(frames) do
-            if f.name == "ChatBridgeRedeemBox" then
-                redeembox = f
-                f.GetText = function(self) return rawget(self, "text") end
-                f.SetText = function(self, t) self.text = t end
-            end
-        end""")
-    before = len(seen)
-    lua.eval("ChatBridge.Redeem")()
-    lua.execute(b'redeembox.text = " WOW-ABCDE-FGHJK-LMNPQ "')
-    lua.eval("ChatBridge.Redeem")()
-    assert lua.eval("redeembox.text") == b""
-    pump(0.8)
-    assert [p for _, p in seen[before:]] == [b"K\t\tWOW-ABCDE-FGHJK-LMNPQ"], seen[before:]
+    assert b"U\t1\t" in got and got[-1] == b"W\t1,124,743,450,207,207,18\t", got
+    # 游戏里不能有兑换码输入框（暴雪插件政策：游戏内不出现付费相关的东西）
+    assert lua.eval("ChatBridge.Redeem") is None
+    assert lua.eval('(function() for _, f in ipairs(frames) do if f.name == "ChatBridgeRedeemBox" then return true end end return false end)()') is False
     before = len(seen)
     lua.eval("ChatBridge.RequestUsage")()
     pump(1.5)
