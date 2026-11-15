@@ -9,12 +9,14 @@
   --autostart    打开后自动点「启动」（更新前翻译在跑时用）
 """
 import ctypes
+import json
 import os
 import shutil
 import subprocess
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 import zipfile
 from tkinter import filedialog
 
@@ -31,6 +33,9 @@ GOLD, GOLD_DIM, TEXT, DIM = "#ffd100", "#c9a44c", "#eadfc6", "#8d8268"
 BTN, BTN_HOVER, BTN_OFF = "#6b1010", "#8c1818", "#2b2520"
 GOOD, BAD = "#4fd15a", "#ff5f4d"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+PRIVACY_URL = "https://wow.husen.ca/privacy.html"
+PRIVACY_TEXT = ("默认用线上翻译服务：要翻的那一句话和一个匿名设备编号会发到 wow.husen.ca，服务器不保存聊天内容。"
+                "不想经过我们的服务器：打开后在启动器里点「自带模型」，聊天只发往你自己填的地址。")
 
 
 def resource(name):
@@ -85,6 +90,31 @@ def register(target_dir, uninstaller):
             winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
         winreg.SetValueEx(k, "NoModify", 0, winreg.REG_DWORD, 1)
         winreg.SetValueEx(k, "NoRepair", 0, winreg.REG_DWORD, 1)
+
+
+def launcher_settings_path():
+    """和启动器用同一个文件：%APPDATA%\\WoWChatTranslator\\launcher.json。"""
+    return os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "WoWChatTranslator", "launcher.json")
+
+
+def load_launcher_settings():
+    try:
+        with open(launcher_settings_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_launcher_setting(key, value):
+    data = load_launcher_settings()
+    data[key] = value
+    try:
+        os.makedirs(os.path.dirname(launcher_settings_path()), exist_ok=True)
+        with open(launcher_settings_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass                                     # 存不上就按默认（检查更新），不影响安装
 
 
 def install(target_dir, shortcut=True, registry=True, progress=lambda text: None):
@@ -152,8 +182,20 @@ class Wizard:
         self.shortcut = tk.BooleanVar(value=True)
         tk.Checkbutton(p, text="在桌面创建快捷方式", variable=self.shortcut, bg=PANEL, fg=TEXT, selectcolor=BG,
                        activebackground=PANEL, activeforeground=TEXT, font=(FONT, 10), anchor="w").pack(fill="x", pady=(10, 0))
+        self.auto_update = tk.BooleanVar(value=load_launcher_settings().get("auto_check_update", True))
+        tk.Checkbutton(p, text="启动时自动检查更新（会访问 wow.husen.ca）", variable=self.auto_update, bg=PANEL, fg=TEXT,
+                       selectcolor=BG, activebackground=PANEL, activeforeground=TEXT, font=(FONT, 10),
+                       anchor="w").pack(fill="x")
         tk.Label(p, text="不需要管理员权限。以后升级直接再装一次，余额和设置不会丢。", bg=PANEL, fg=DIM, font=(FONT, 9),
                  anchor="w", justify="left", wraplength=wrap).pack(fill="x", pady=(8, 0))
+
+        tk.Label(p, text="隐私", bg=PANEL, fg=GOLD_DIM, font=(FONT, 10, "bold"), anchor="w").pack(fill="x", pady=(12, 0))
+        tk.Label(p, text=PRIVACY_TEXT, bg=PANEL, fg=DIM, font=(FONT, 9), anchor="w", justify="left",
+                 wraplength=wrap).pack(fill="x", pady=(4, 0))
+        link = tk.Label(p, text="完整隐私说明：" + PRIVACY_URL, bg=PANEL, fg=GOLD, font=(FONT, 9, "underline"),
+                        anchor="w", cursor="hand2")
+        link.pack(fill="x", pady=(4, 0))
+        link.bind("<ButtonRelease-1>", lambda e: webbrowser.open(PRIVACY_URL))
 
         self.status = tk.Label(body, text="", bg=BG, fg=DIM, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
         self.status.pack(fill="x", pady=(12, 8))
@@ -207,6 +249,7 @@ class Wizard:
         try:
             exe = install(self.dir.get(), shortcut=self.shortcut.get(),
                           progress=lambda text: self.root.after(0, lambda: self.status.configure(text=text, fg=DIM)))
+            save_launcher_setting("auto_check_update", bool(self.auto_update.get()))
             self.root.after(0, lambda: self.done(exe, None))
         except Exception as e:
             self.root.after(0, lambda err=str(e): self.done(None, err))

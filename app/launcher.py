@@ -346,7 +346,8 @@ class Launcher:
         self.auto_update_addon()
         if "--autostart" in sys.argv:                 # 刚自动更新完：更新前在跑翻译，就接着跑
             root.after(800, self.start)
-        root.after(1500, lambda: self.check_update(manual=False))
+        if self.settings.get("auto_check_update", True):   # 安装时可以关掉；关了就只在点「检查更新」时联网
+            root.after(1500, lambda: self.check_update(manual=False))
         self.flavor.trace_add("write", lambda *a: self.flavor_changed())
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(200, self.tick)

@@ -35,10 +35,24 @@ python build.py                 # 打包，产物在 dist/
 
 插件测试：`pip install lupa`，然后 `python tests/test_addon.py`。
 
+发布用的安装包由 GitHub Actions（`.github/workflows/build.yml`）从本仓库源码自动构建。
+
 ## 隐私
 
 - 线上服务只收到要翻译的那一句话和一个匿名设备编号，不存聊天内容。
 - 自带模型模式下，聊天只发给你自己填的地址。
+- 启动时会检查更新（安装时可以关掉）。完整说明：<https://wow.husen.ca/privacy.html>
+
+## 代码签名政策 · Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+（申请审核中；通过前的安装包还没有签名。）
+
+- 安装包只由本仓库的 GitHub Actions 从公开源码构建，每次发版由维护者人工批准后签名。
+- Committers and reviewers: [senbuilds](https://github.com/senbuilds)
+- Approvers: [senbuilds](https://github.com/senbuilds)
+- Privacy policy: <https://wow.husen.ca/privacy.html> (shown in the installer; the update check can be turned off there,
+  and the online translation service can be replaced with the user's own model in the launcher).
 
 ## 许可
 

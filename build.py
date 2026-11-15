@@ -23,6 +23,40 @@ def run(*args):
     subprocess.run(args, check=True, cwd=ROOT)
 
 
+PRODUCT = "WoW Chat Translator"
+VERSION_TEMPLATE = """VSVersionInfo(
+  ffi=FixedFileInfo(filevers=%(tuple)s, prodvers=%(tuple)s, mask=0x3f, flags=0x0, OS=0x40004,
+                    fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable('040904B0', [
+      StringStruct('CompanyName', 'senbuilds'),
+      StringStruct('FileDescription', %(desc)r),
+      StringStruct('FileVersion', %(ver)r),
+      StringStruct('InternalName', %(name)r),
+      StringStruct('LegalCopyright', 'GPL-3.0'),
+      StringStruct('OriginalFilename', %(file)r),
+      StringStruct('ProductName', %(product)r),
+      StringStruct('ProductVersion', %(ver)r)])]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+"""
+
+
+def version_file(name, desc):
+    """Windows 文件属性里的产品名和版本号（代码签名要求每个 exe 都带上）。"""
+    sys.path.insert(0, os.path.join(ROOT, "app"))
+    from version import VERSION
+    nums = [int(x) for x in VERSION.split(".")][:4]
+    nums += [0] * (4 - len(nums))
+    path = os.path.join(WORK, name + "-version.txt")
+    os.makedirs(WORK, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(VERSION_TEMPLATE % {"tuple": tuple(nums), "ver": VERSION, "desc": desc, "name": name,
+                                    "file": name + ".exe", "product": PRODUCT})
+    return path
+
+
 def main():
     subprocess.run([sys.executable, os.path.join(ROOT, "tools", "make_icon.py")], check=True)
     for d in (DIST, WORK):
@@ -31,6 +65,7 @@ def main():
     # 1) 程序本体。--noconsole：不弹黑窗口；数据文件：游戏插件和图标
     run(sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--log-level", "WARN",
         "--name", "WoWTranslator", "--noconsole", "--icon", ICON,
+        "--version-file", version_file("WoWTranslator", "WoW Chat Translator"),
         "--paths", os.path.join(ROOT, "app"),
         "--hidden-import", "app", "--hidden-import", "launcher", "--hidden-import", "codec",
         "--hidden-import", "version",
@@ -51,6 +86,7 @@ def main():
     # 3) 安装包：单文件，里面带着 payload.zip
     run(sys.executable, "-m", "PyInstaller", "--noconfirm", "--log-level", "WARN",
         "--name", "WoWTranslatorSetup", "--onefile", "--noconsole", "--icon", ICON,
+        "--version-file", version_file("WoWTranslatorSetup", "WoW Chat Translator Setup"),
         "--paths", os.path.join(ROOT, "app"), "--hidden-import", "version",
         "--add-data", payload + os.pathsep + ".", "--add-data", ICON + os.pathsep + ".",
         "--distpath", DIST, "--workpath", WORK, "--specpath", WORK,

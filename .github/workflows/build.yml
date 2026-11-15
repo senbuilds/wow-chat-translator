@@ -1,0 +1,43 @@
+# Builds the Windows installer from this repository's source code.
+# Every published installer comes from a run of this workflow; signing is added as a later step
+# (SignPath) and needs a maintainer's manual approval for each release.
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: python -m pip install pyinstaller==6.22.3 pillow==13.0.0 lupa==2.8
+
+      - name: Addon tests
+        run: python tests/test_addon.py
+
+      - name: Build installer
+        run: python build.py
+
+      - name: Rename installer
+        shell: pwsh
+        run: Get-ChildItem dist -Filter *.exe | Move-Item -Destination dist/WoWTranslatorSetup.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WoWTranslatorSetup
+          path: dist/WoWTranslatorSetup.exe
+          if-no-files-found: error
