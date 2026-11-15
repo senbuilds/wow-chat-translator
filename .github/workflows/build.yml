@@ -16,6 +16,8 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"          # the build script prints Chinese; the runner's console is cp1252
     steps:
       - uses: actions/checkout@v4
 
