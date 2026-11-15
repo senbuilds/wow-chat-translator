@@ -2,6 +2,7 @@
 
 运行：python tests/test_addon.py   （需要 pip install lupa）
 """
+import locale
 import os
 import sys
 
@@ -117,6 +118,9 @@ def read_strip(lua):
 
 
 def main():
+    # Python 启动时会把字符分类设成系统区域（英文 Windows 是 cp1252），Lua 的 %s、%c 会跟着变，
+    # 把中文 UTF-8 里的 0x85、0x9D 之类当成空白/控制字符。游戏里的 Lua 用的是 C 区域，这里对齐。
+    locale.setlocale(locale.LC_CTYPE, "C")
     lua = lua51.LuaRuntime(unpack_returned_tuples=True, encoding=None)
     lua.execute(STUBS.encode())
     with open(os.path.join(ROOT, "addon", "ChatBridge", "ChatBridge.lua"), "rb") as f:
