@@ -10,7 +10,7 @@
 ChatBridge = {}
 local CB = ChatBridge
 
-CB.VERSION = "2.1"
+CB.VERSION = "2.2"
 CB.COLS, CB.ROWS, CB.CELL, CB.HEADER = 64, 8, 4, 8
 CB.MAX_PAYLOAD = math.floor((CB.COLS * CB.ROWS - CB.HEADER) * 6 / 8) - 5
 CB.HOLD = 0.25          -- 每条消息的色块显示秒数
@@ -170,6 +170,17 @@ function CB.Enqueue(payload)
     queue[#queue + 1] = payload
 end
 
+-- 鼠标滚轮翻看之前的译文：发 "V\t格数\t"；还没发出去的滚动合并成一条
+function CB.EnqueueScroll(delta)
+    local last = queue[#queue]
+    local prev = last and tonumber(last:match("^V\t(%-?%d+)\t$"))
+    if prev then
+        queue[#queue] = "V\t" .. (prev + delta) .. "\t"
+    else
+        CB.Enqueue("V\t" .. delta .. "\t")
+    end
+end
+
 local driver = CreateFrame("Frame")
 driver:SetScript("OnUpdate", function(_, elapsed)
     if showing then
@@ -198,7 +209,18 @@ end
 
 local lastSecretNotice = -100
 
-local function onChat(event, text, sender)
+-- 发言人的职业颜色（和官方聊天框一样），拿不到就不带
+local function classHex(guid)
+    if not guid or isSecret(guid) or type(guid) ~= "string" or guid == "" then return nil end
+    local ok, _, classFile = pcall(GetPlayerInfoByGUID, guid)
+    if not ok or not classFile or isSecret(classFile) then return nil end
+    local c = (C_ClassColor and C_ClassColor.GetClassColor and C_ClassColor.GetClassColor(classFile))
+        or (RAID_CLASS_COLORS and RAID_CLASS_COLORS[classFile])
+    if not c then return nil end
+    return string.format("%02x%02x%02x", floor(c.r * 255 + 0.5), floor(c.g * 255 + 0.5), floor(c.b * 255 + 0.5))
+end
+
+local function onChat(event, text, sender, guid)
     local code = CODES[event]
     if not code or not ChatBridgeDB.enabled then return end
     if not ChatBridgeDB.subs[code] then return end   -- 没订阅这个频道
@@ -224,6 +246,11 @@ local function onChat(event, text, sender)
 
     local clean = CB.Clean(text)
     if clean == "" then return end
+    -- 有聊天要翻的时候，如果翻译页位置有一阵没发了，顺手先补发一次：
+    -- 小程序可能是进游戏以后才启动的，错过了加载时发的那次
+    if CB.RefreshRectIfStale then CB.RefreshRectIfStale() end
+    local hex = classHex(guid)
+    if hex and name ~= "?" then name = name .. "\031" .. hex end
     CB.Enqueue(code .. "\t" .. name .. "\t" .. clean)
     if CB.NoteIncoming then CB.NoteIncoming() end
 end
@@ -300,12 +327,18 @@ function CB.PageRect()
         floor(width * k + 0.5), floor((height - GRIP - (usageMode and INPUT or 0)) * k + 0.5))
 end
 
+local lastRectAt = -100
+
 local function sendRect(force)
     local rect = CB.PageRect()
     if force or rect ~= lastRect then
-        lastRect = rect
+        lastRect, lastRectAt = rect, GetTime()
         CB.Enqueue("W\t" .. rect .. "\t")
     end
+end
+
+function CB.RefreshRectIfStale()
+    if panel and GetTime() - lastRectAt > 30 then sendRect(true) end
 end
 
 local function refreshButton()
@@ -421,17 +454,24 @@ local function buildPage()
 
     local bg = panel:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints(panel)
-    bg:SetColorTexture(0.06, 0.07, 0.09, 1)
-    local note = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    note:SetPoint("CENTER")
-    note:SetText("译文由电脑上的翻译小程序显示\n看不到就双击 start.bat；切到别的窗口时会暂时隐藏")
+    bg:SetColorTexture(0.04, 0.05, 0.07, 0.55)        -- 半透明：能透出后面的游戏画面
 
     -- 底部一条：左下角是缩放角标，右边是「用量」
     local bar = panel:CreateTexture(nil, "BORDER")
     bar:SetPoint("BOTTOMLEFT")
     bar:SetPoint("BOTTOMRIGHT")
     bar:SetHeight(GRIP)
-    bar:SetColorTexture(0.12, 0.14, 0.18, 1)
+    bar:SetColorTexture(0.10, 0.12, 0.16, 0.85)
+    local note = panel:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    note:SetPoint("LEFT", bar, "LEFT", 20, 0)
+    note:SetPoint("RIGHT", bar, "RIGHT", -46, 0)
+    note:SetJustifyH("LEFT")
+    note:SetWordWrap(false)
+    note:SetText("看不到译文：打开桌面「魔兽聊天翻译」点启动")
+
+    -- 滚轮翻看之前的译文（译文由小程序显示，这里把滚动转给它）
+    panel:EnableMouseWheel(true)
+    panel:SetScript("OnMouseWheel", function(_, delta) CB.EnqueueScroll(delta) end)
 
     local usage = CreateFrame("Button", nil, panel)
     usage:SetSize(40, GRIP)
@@ -737,8 +777,8 @@ events:SetScript("OnEvent", function(_, event, ...)
     elseif event == "DISPLAY_SIZE_CHANGED" or event == "UI_SCALE_CHANGED" then
         layout()
     else
-        local text, sender = ...
-        local ok, err = pcall(onChat, event, text, sender)
+        local text, sender, _, _, _, _, _, _, _, _, _, guid = ...
+        local ok, err = pcall(onChat, event, text, sender, guid)
         if not ok and ChatBridgeDB.debug then print(PREFIX .. "出错: " .. tostring(err)) end
     end
 end)

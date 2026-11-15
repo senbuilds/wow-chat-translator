@@ -3,7 +3,7 @@
 ## Title-zhCN: ChatBridge 聊天翻译桥
 ## Notes: Shows incoming chat as a small colour strip that the companion translator app reads.
 ## Notes-zhCN: 把收到的聊天显示成屏幕左上角的小色块，供游戏外的翻译小程序读取。
-## Version: 2.1
+## Version: 2.2
 ## SavedVariables: ChatBridgeDB
 
 ChatBridge.lua

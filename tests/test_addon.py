@@ -300,6 +300,37 @@ def main():
     lua.eval("ChatBridge.ResetLayout")()
     assert lua.eval("ChatBridgeDB.panelBox") is None
 
+    # 职业颜色：带 GUID 的消息，名字后面带 \x1f + 6 位颜色；拿不到职业就不带
+    lua.execute(b"""
+        RAID_CLASS_COLORS = { PALADIN = { r = 0.96, g = 0.55, b = 0.73 } }
+        function GetPlayerInfoByGUID(g) if g == "Player-1-PAL" then return "Paladin", "PALADIN" end end
+    """)
+    before = len(seen)
+    fire(b"CHAT_MSG_PARTY", b"heal pls", b"Holy-Server", b"", b"", b"", b"", 0, 0, b"", 0, 1, b"Player-1-PAL")
+    fire(b"CHAT_MSG_PARTY", b"no guid here", b"Mystery")
+    pump(1.0)
+    got = [p for _, p in seen[before:] if not p.startswith(b"W\t")]
+    assert got == [b"P\tHoly\x1ff58cba\theal pls", b"P\tMystery\tno guid here"], got
+
+    # 滚轮：还没发出去的滚动合并成一条
+    before = len(seen)
+    for d in (1, 1, 1, -1):
+        lua.eval("ChatBridge.EnqueueScroll")(d)
+    pump(1.0)
+    assert [p for _, p in seen[before:]] == [b"V\t2\t"], seen[before:]
+
+    # 小程序晚于游戏启动：30 秒没发过位置，下一条聊天前顺手补发一次位置
+    lua.execute(b"now = now + 40")
+    before = len(seen)
+    fire(b"CHAT_MSG_PARTY", b"late app", b"Mate")
+    pump(1.0)
+    got = [p for _, p in seen[before:]]
+    assert got[0].startswith(b"W\t") and got[-1] == b"P\tMate\tlate app", got
+    before = len(seen)
+    fire(b"CHAT_MSG_PARTY", b"again", b"Mate")
+    pump(1.0)
+    assert [p for _, p in seen[before:]] == [b"P\tMate\tagain"], "刚补发过就不该再发"
+
     print("addon tests passed:", len(seen), "frames decoded")
 
 

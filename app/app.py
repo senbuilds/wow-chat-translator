@@ -493,7 +493,7 @@ class Overlay:
         for code, (_, color) in CHANNELS.items():
             self.log.tag_configure("ch" + code, foreground=color)
 
-        self._set_mode(bool(self.dock) and cfg.get("dock", True))
+        self._set_mode(bool(cfg.get("dock", True)))
         self.capture.start()
         threading.Thread(target=self._translate_loop, daemon=True).start()
         threading.Thread(target=self._health_loop, daemon=True).start()
@@ -524,12 +524,14 @@ class Overlay:
             w.place_forget()
         if docked:
             (self.usage_view if self.usage_on else self.log).pack(fill="both", expand=True)
-            self.root.attributes("-alpha", float(self.cfg.get("dock_opacity", 0.97)))
+            self.root.attributes("-alpha", 1.0)
+            self.root.attributes("-transparentcolor", BG)   # 背景透明：底下是游戏里画的半透明底板
             self.root.withdraw()            # 等 _place 算好位置再显示
         else:
             self.bar.pack(fill="x", side="top")
             (self.usage_view if self.usage_on else self.log).pack(fill="both", expand=True, side="top")
             self.grip.place(relx=1.0, rely=1.0, anchor="se")
+            self.root.attributes("-transparentcolor", "")
             self.root.attributes("-alpha", float(self.cfg.get("opacity", 0.9)))
             k = self.k
             self.root.geometry(self.cfg.get("geometry") or "%dx%d+%d+%d" % (480 * k, 300 * k, 40 * k, 420 * k))
@@ -618,6 +620,11 @@ class Overlay:
                 self.ui.put(("dock", sender))
             elif code == "A":
                 self.ui.put(("account",))
+            elif code == "V":
+                try:
+                    self.ui.put(("scroll", int(sender)))
+                except ValueError:
+                    pass
             elif code == "U":
                 self.ui.put(("usage_mode", sender != "0"))
             elif code == "K":
@@ -639,6 +646,7 @@ class Overlay:
 
     # --- 界面更新 ---
     def _append(self, pieces):
+        at_bottom = self.log.yview()[1] >= 0.999
         self.log.configure(state="normal")
         # 换行放在每条前面而不是后面，免得底部总留一行空白
         if self.log.index("end-1c") != "1.0":
@@ -650,7 +658,8 @@ class Overlay:
         if lines > 400:
             self.log.delete("1.0", "%d.0" % (lines - 400))
         self.log.configure(state="disabled")
-        self.log.see("end")
+        if at_bottom:
+            self.log.see("end")
 
     def _on_dock(self, spec):
         """插件发来翻译页的位置："1,左,上,宽,高" 或 "0"（没显示）。"""
@@ -677,7 +686,13 @@ class Overlay:
                 if kind == "chat":
                     _, code, sender, text, translated, err = item
                     label, _ = CHANNELS.get(code, ("?", FG))
-                    pieces = [("[%s] " % label, "ch" + code), (sender, "name"), (": ", "name")]
+                    name_tag = "name"
+                    if "\x1f" in sender:              # 插件带来了职业颜色：名字 \x1f rrggbb
+                        sender, hexcolor = sender.split("\x1f", 1)
+                        if len(hexcolor) == 6 and all(c in "0123456789abcdefABCDEF" for c in hexcolor):
+                            name_tag = "cls" + hexcolor.lower()
+                            self.log.tag_configure(name_tag, foreground="#" + hexcolor.lower())
+                    pieces = [("[%s] " % label, "ch" + code), (sender, name_tag), (": ", "name")]
                     if translated:
                         pieces.append((translated + "\n", ()))
                         if self.cfg.get("show_original", True):
@@ -699,6 +714,9 @@ class Overlay:
                     self._on_dock(item[1])
                 elif kind == "usage":
                     self._show_usage(item[1], item[2])
+                elif kind == "scroll":
+                    view = self.usage_view if self.usage_on else self.log
+                    view.yview_scroll(-3 * item[1], "units")
                 elif kind == "usage_mode":
                     self._set_usage_mode(item[1])
                 elif kind == "account":
