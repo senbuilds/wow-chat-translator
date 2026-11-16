@@ -482,6 +482,9 @@ class Overlay:
 
         # 贴合时盖住游戏底条上「翻译程序没开」那句提示：程序开着，提示就看不见
         self.hint_cover = tk.Frame(root, bg=GAME_BAR, highlightthickness=0, bd=0)
+        # 插件在翻译页中间画的「翻译程序没开」提示卡：程序开着时用同色的卡盖住，写自己的状态
+        self.card_cover = tk.Label(root, bg=GAME_BAR, fg=FG_DIM, font=(FONT, 10), justify="center",
+                                   text="翻译程序已连上\n等待游戏里的聊天…", highlightthickness=0, bd=0)
         self.grip = tk.Label(root, text="◢", bg=BG, fg="#4a4f59", font=(FONT, 8), cursor="size_nw_se")
         self.grip.bind("<Button-1>", self._resize_start)
         self.grip.bind("<B1-Motion>", self._resize_move)
@@ -538,7 +541,7 @@ class Overlay:
             return
         self.docked = docked
         self.placed = None
-        for w in (self.bar, self.grip, self.log, self.usage_view, self.hint_cover):
+        for w in (self.bar, self.grip, self.log, self.usage_view, self.hint_cover, self.card_cover):
             w.pack_forget()
             w.place_forget()
         if docked:
@@ -580,8 +583,11 @@ class Overlay:
                     height = bar_top + bar_h - pad
                     if right > left:
                         cover = (left - pad, bar_top - pad, right - left, bar_h)
-                want = "%dx%d+%d+%d" % (width, height, origin[0] + x + pad, origin[1] + y + pad)
-                layout = (width, content, cover)
+                card = None
+                if len(self.dock) >= 11 and self.dock[9] > 0 and self.dock[10] > 0:
+                    card = (self.dock[7] - pad, self.dock[8] - pad, self.dock[9], self.dock[10])
+                want = "%dx%d+%d+%d|%s" % (width, height, origin[0] + x + pad, origin[1] + y + pad, card)
+                layout = (width, content, cover, card)
             if want != self.placed:
                 self.placed = want
                 if want:
@@ -592,7 +598,13 @@ class Overlay:
                         self.hint_cover.place(x=cx, y=cy, width=cw, height=ch)
                     else:
                         self.hint_cover.place_forget()
-                    self.root.geometry(want)
+                    if layout[3]:
+                        cx, cy, cw, ch = layout[3]
+                        self.card_cover.place(x=cx, y=cy, width=cw, height=ch)
+                        self.card_cover.lift()
+                    else:
+                        self.card_cover.place_forget()
+                    self.root.geometry(want.split("|")[0])
                     self.root.deiconify()
                     self.root.attributes("-topmost", True)
                     self._click_through(True)
@@ -699,8 +711,8 @@ class Overlay:
     def _on_dock(self, spec):
         """插件发来翻译页的位置："1,左,上,宽,高" 或 "0"（没显示）。"""
         nums = [int(n) for n in spec.split(",") if n.strip().lstrip("-").isdigit()]
-        if len(nums) in (5, 7) and nums[0] == 1 and nums[3] > 0 and nums[4] > 0:
-            self.dock = [True] + nums[1:]       # 新插件多带：底条顶边位置、底条高度
+        if len(nums) in (5, 7, 11) and nums[0] == 1 and nums[3] > 0 and nums[4] > 0:
+            self.dock = [True] + nums[1:]       # 新插件多带：底条顶边位置、底条高度；再多 4 个是中间提示卡
         elif self.dock:
             self.dock = [False] + list(self.dock[1:])
         else:

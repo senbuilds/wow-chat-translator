@@ -10,7 +10,7 @@
 ChatBridge = {}
 local CB = ChatBridge
 
-CB.VERSION = "2.6"
+CB.VERSION = "2.7"
 CB.COLS, CB.ROWS, CB.CELL, CB.HEADER = 64, 8, 4, 8
 CB.MAX_PAYLOAD = math.floor((CB.COLS * CB.ROWS - CB.HEADER) * 6 / 8) - 5
 CB.HOLD = 0.25          -- 每条消息的色块显示秒数
@@ -253,6 +253,11 @@ local function onChat(event, text, sender, guid)
     if hex and name ~= "?" then name = name .. "\031" .. hex end
     CB.Enqueue(code .. "\t" .. name .. "\t" .. clean)
     if CB.NoteIncoming then CB.NoteIncoming() end
+    ChatBridgeDB.lastChatAt = time and time() or nil
+    if not CB.sawChat then
+        CB.sawChat = true
+        if CB.UpdateCard then CB.UpdateCard() end
+    end
 end
 
 ---------------------------------------------------------------------------
@@ -370,12 +375,35 @@ function CB.PageRect()
     local left, top, width, height = panel:GetLeft(), panel:GetTop(), panel:GetWidth(), panel:GetHeight()
     if not (left and top and width and height and physicalHeight) then return "0" end
     local k = panel:GetEffectiveScale() * physicalHeight / 768
-    return string.format("1,%d,%d,%d,%d,%d,%d", floor(left * k + 0.5), floor(physicalHeight - top * k + 0.5),
+    local rect = string.format("1,%d,%d,%d,%d,%d,%d", floor(left * k + 0.5), floor(physicalHeight - top * k + 0.5),
         floor(width * k + 0.5), floor((height - GRIP) * k + 0.5),
         floor((height - GRIP) * k + 0.5), floor(GRIP * k + 0.5))
+    local card = CB.card
+    if card and card:IsShown() then
+        local cl, ct, cw, ch = card:GetLeft(), card:GetTop(), card:GetWidth(), card:GetHeight()
+        if cl and ct and cw and ch then
+            local ck = card:GetEffectiveScale() * physicalHeight / 768
+            rect = rect .. string.format(",%d,%d,%d,%d", floor(cl * ck - left * k + 0.5),
+                floor(top * k - ct * ck + 0.5), floor(cw * ck + 0.5), floor(ch * ck + 0.5))
+        end
+    end
+    return rect
 end
 
 local lastRectAt = -100
+
+function CB.CardWanted()
+    if CB.sawChat then return false end
+    local last = ChatBridgeDB and ChatBridgeDB.lastChatAt
+    if last and time and time() - last < 1800 then return false end
+    return true
+end
+
+function CB.UpdateCard(quiet)
+    if not CB.card then return end
+    if CB.CardWanted() then CB.card:Show() else CB.card:Hide() end
+    if not quiet and CB.SendRectNow then CB.SendRectNow() end      -- 登录时后面马上会发，不用这里再发
+end
 
 local function sendRect(force)
     local rect = CB.PageRect()
@@ -383,6 +411,10 @@ local function sendRect(force)
         lastRect, lastRectAt = rect, GetTime()
         CB.Enqueue("W\t" .. rect .. "\t")
     end
+end
+
+function CB.SendRectNow()
+    if panel then sendRect(false) end       -- 位置（含提示卡）真变了才发
 end
 
 function CB.RefreshRectIfStale()
@@ -503,6 +535,26 @@ local function buildPage()
     -- 这句提示一直画着，但翻译程序开着时会被它的同色遮片盖住，所以只有程序没开时才看得见
     -- 从 CurseForge 只装了插件的人也要看得懂：没装程序就去官网下载（只给地址，不提钱）
     note:SetText("没开翻译程序？下载 wow.husen.ca")
+
+    -- 中间的提示卡：比底条那句显眼。还没收到过聊天时才显示（之后页面上有译文，卡就收起来）。
+    -- 位置通过翻译页矩形一起发给小程序：程序开着时它在同一位置盖一张同色的卡，写「已连上，等待聊天」，
+    -- 所以这句「没开」只有程序真没开时才看得见。
+    local card = CreateFrame("Frame", "ChatBridgeCard", panel)
+    card:SetPoint("LEFT", panel, "LEFT", 14, GRIP / 2)
+    card:SetPoint("RIGHT", panel, "RIGHT", -14, GRIP / 2)
+    card:SetHeight(52)
+    local cardBg = card:CreateTexture(nil, "BACKGROUND")
+    cardBg:SetAllPoints(card)
+    cardBg:SetColorTexture(0.10, 0.12, 0.16, 1)
+    local cardTitle = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    cardTitle:SetPoint("TOP", card, "TOP", 0, -9)
+    cardTitle:SetText("翻译程序没开")
+    local cardText = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    cardText:SetPoint("TOP", cardTitle, "BOTTOM", 0, -5)
+    cardText:SetPoint("LEFT", card, "LEFT", 8, 0)
+    cardText:SetPoint("RIGHT", card, "RIGHT", -8, 0)
+    cardText:SetText("去 wow.husen.ca 下载电脑程序，打开后点「启动」")
+    CB.card = card
 
     -- 滚轮翻看之前的译文（译文由小程序显示，这里把滚动转给它）
     panel:EnableMouseWheel(true)
@@ -764,6 +816,7 @@ events:SetScript("OnEvent", function(_, event, ...)
         CB.Enqueue("@\t" .. CB.VERSION .. "\t" .. (UnitName("player") or ""))
         local ok, err = pcall(buildPage)
         if not ok then print(PREFIX .. "翻译页没建成: " .. tostring(err)) end
+        CB.UpdateCard(true)
         sendRect(true)
         CB.Announce()
         print(PREFIX .. "已加载。点「翻译」看译文（按钮和翻译页都能拖）；打中文后按 Ctrl+T 翻成英文。/cb 看更多。")

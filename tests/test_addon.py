@@ -184,6 +184,15 @@ def main():
     pump(0.8)
     assert seen[-1][1] == b"W	1,124,743,450,207,207,18	", "不挨着的窗口不该藏译文"
     lua.execute(b"CharacterFrame:Hide()")
+
+    # 中间提示卡（还没收到过聊天时显示）：位置跟在矩形后面发给小程序，让它在同一位置盖上自己的卡
+    lua.execute(b"for _, f in ipairs(frames) do if f.name == 'ChatBridgeCard' then "
+                b"f.l, f.t, f.w, f.h, f.es = 124, 232, 372, 52, 0.8 end end")
+    pump(0.8)
+    assert seen[-1][1] == b"W	1,124,743,450,207,207,18,16,77,419,59	", seen[-1]
+    lua.execute(b"ChatBridge.sawChat = true; ChatBridge.UpdateCard()")     # 收到聊天后卡收起
+    pump(0.8)
+    assert seen[-1][1] == b"W	1,124,743,450,207,207,18	", seen[-1]
     n = len(seen)
     toggle()
     pump(0.8)
