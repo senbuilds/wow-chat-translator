@@ -10,7 +10,7 @@
 ChatBridge = {}
 local CB = ChatBridge
 
-CB.VERSION = "2.4"
+CB.VERSION = "2.5"
 CB.COLS, CB.ROWS, CB.CELL, CB.HEADER = 64, 8, 4, 8
 CB.MAX_PAYLOAD = math.floor((CB.COLS * CB.ROWS - CB.HEADER) * 6 / 8) - 5
 CB.HOLD = 0.25          -- 每条消息的色块显示秒数
@@ -316,9 +316,56 @@ local usageMode = false  -- 翻译页当前显示的是「用量」而不是聊�
 local usageButtonLabel = nil
 local GRIP = 16      -- 底板最下面留一条：拖动条 + 右下角缩放角标（小程序不盖这一条）
 
+-- 游戏自己的窗口（专业、背包、人物、地图、菜单、提示框……）盖到翻译页上时，小程序的译文要先藏起来：
+-- 译文是电脑程序画在游戏上面的一层，不藏就会压在这些窗口上。窗口一关，译文自动回来。
+local COVER_FRAMES = {
+    "GameMenuFrame", "SettingsPanel", "InterfaceOptionsFrame", "VideoOptionsFrame", "KeyBindingFrame", "MacroFrame",
+    "HelpFrame", "WorldMapFrame", "FlightMapFrame", "TaxiFrame", "BattlefieldFrame", "PVPFrame", "PVEFrame",
+    "LFGParentFrame", "CharacterFrame", "InspectFrame", "DressUpFrame", "SpellBookFrame", "PlayerSpellsFrame",
+    "PlayerTalentFrame", "TalentFrame", "TradeSkillFrame", "ProfessionsFrame", "CraftFrame", "ClassTrainerFrame",
+    "QuestLogFrame", "QuestFrame", "GossipFrame", "FriendsFrame", "GuildFrame", "CommunitiesFrame",
+    "CollectionsJournal", "EncounterJournal", "AchievementFrame", "CalendarFrame", "MerchantFrame", "MailFrame",
+    "OpenMailFrame", "TradeFrame", "AuctionHouseFrame", "AuctionFrame", "BankFrame", "LootFrame", "GroupLootFrame1",
+    "GroupLootFrame2", "GroupLootFrame3", "GroupLootFrame4", "TabardFrame", "PetStableFrame",
+    "StaticPopup1", "StaticPopup2", "StaticPopup3", "StaticPopup4", "ContainerFrameCombinedBags",
+    "GameTooltip", "ItemRefTooltip", "ShoppingTooltip1", "ShoppingTooltip2",
+    "ChatBridgeSettings",                    -- 自己的频道设置窗口
+}
+for i = 1, 13 do COVER_FRAMES[#COVER_FRAMES + 1] = "ContainerFrame" .. i end
+
+local function screenBox(f)
+    local l, b, w, h = f:GetRect()
+    if not (l and b and w and h) then return nil end
+    local s = f:GetEffectiveScale()
+    return l * s, b * s, (l + w) * s, (b + h) * s
+end
+
+local function overlaps(f, pl, pb, pr, pt)
+    if not (f and f ~= panel and f.IsVisible and f:IsVisible()) then return false end
+    local l, b, r, t = screenBox(f)
+    return l ~= nil and l < pr and r > pl and b < pt and t > pb
+end
+
+function CB.PageCovered()
+    if not panel then return false end
+    local pl, pb, pr, pt = screenBox(panel)
+    if not pl then return false end
+    for _, name in ipairs(COVER_FRAMES) do
+        if overlaps(_G[name], pl, pb, pr, pt) then return true end
+    end
+    if GetUIPanel then                       -- 其他插件也会把窗口登记成游戏面板
+        for _, where in ipairs({ "left", "center", "right", "doublewide", "fullscreen" }) do
+            local ok, f = pcall(GetUIPanel, where)
+            if ok and overlaps(f, pl, pb, pr, pt) then return true end
+        end
+    end
+    return false
+end
+
 -- 内容区在游戏窗口里的物理像素矩形："1,左,上,宽,高"；没显示时是 "0"
 function CB.PageRect()
     if dragging or not panel or not panel:IsVisible() then return "0" end
+    if CB.PageCovered() then return "0" end
     local _, physicalHeight = GetPhysicalScreenSize()
     local left, top, width, height = panel:GetLeft(), panel:GetTop(), panel:GetWidth(), panel:GetHeight()
     if not (left and top and width and height and physicalHeight) then return "0" end

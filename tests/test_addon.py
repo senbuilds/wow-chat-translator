@@ -35,6 +35,11 @@ local function widget()
     w.GetWidth = function(self) return rawget(self, "w") end
     w.GetHeight = function(self) return rawget(self, "h") end
     w.GetEffectiveScale = function(self) return rawget(self, "es") or 1 end
+    w.GetRect = function(self)
+        local l, t, wd, ht = rawget(self, "l"), rawget(self, "t"), rawget(self, "w"), rawget(self, "h")
+        if not (l and t and wd and ht) then return nil end
+        return l, t - ht, wd, ht
+    end
     w.CreateFontString = function(self) return widget() end
     w.CreateTexture = function(self, _, layer)
         local t = widget(); t.layer = layer
@@ -165,6 +170,21 @@ def main():
     n = len(seen)
     pump(1.5)
     assert len(seen) == n, "位置没变就不该重复发"
+
+    # 游戏窗口（比如专业窗口）盖到翻译页上：发 0 让译文先藏起来；窗口关了自动恢复。不挨着的窗口不影响
+    lua.execute(b"TradeSkillFrame = CreateFrame('Frame', 'TradeSkillFrame'); "
+                b"TradeSkillFrame.l, TradeSkillFrame.t, TradeSkillFrame.w, TradeSkillFrame.h = 200, 400, 300, 300")
+    pump(0.8)
+    assert seen[-1][1] == b"W	0	", seen[-1]
+    lua.execute(b"TradeSkillFrame:Hide()")
+    pump(0.8)
+    assert seen[-1][1] == b"W	1,124,743,450,207,207,18	", seen[-1]
+    lua.execute(b"CharacterFrame = CreateFrame('Frame', 'CharacterFrame'); "
+                b"CharacterFrame.l, CharacterFrame.t, CharacterFrame.w, CharacterFrame.h = 900, 700, 300, 300")
+    pump(0.8)
+    assert seen[-1][1] == b"W	1,124,743,450,207,207,18	", "不挨着的窗口不该藏译文"
+    lua.execute(b"CharacterFrame:Hide()")
+    n = len(seen)
     toggle()
     pump(0.8)
     assert seen[-1][1] == b"W\t0\t", seen[-1]

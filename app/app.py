@@ -740,7 +740,11 @@ class Overlay:
                     if err == NO_BALANCE:
                         self._tell_no_balance()
                 elif kind == "hello":
-                    self._append([("已连上游戏，角色 %s，插件 v%s" % (item[2], item[1]), "note")])
+                    # 插件登录、过加载画面时会连着打好几次招呼；同一个角色和版本只提示一次
+                    hello = (item[2], item[1])
+                    if hello != getattr(self, "last_hello", None):
+                        self.last_hello = hello
+                        self._append([("已连上游戏，角色 %s，插件 v%s" % (item[2], item[1]), "note")])
                 elif kind == "secret":
                     label, _ = CHANNELS.get(item[1], ("?", FG))
                     self._append([("[%s] 有新消息，但游戏在副本限制期间不让插件读取内容。" % label, "note")])
