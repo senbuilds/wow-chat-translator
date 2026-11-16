@@ -215,6 +215,11 @@ def main():
     assert lua.eval('(function() for _, f in ipairs(frames) do if f.name == "ChatBridgeSettings" then return f.shown end end end)()') is True
     assert not any(b"\xe6\xb2\xa1\xe5\xbb\xba\xe6\x88\x90" in bytes(p) for p in lua.eval("printed").values()), "设置窗口建失败了"
     lua.eval("ChatBridge.ToggleSettings")()
+    # 第一次装插件：聊天框里说一次要装电脑程序和下载地址；再进世界不重复说
+    def site_lines():
+        return sum(b"wow.husen.ca" in bytes(p) for p in lua.eval("printed").values())
+    assert site_lines() == 1, site_lines()
+    assert lua.eval("ChatBridgeDB.welcomed") is True      # 记下来了，下次进世界不再说
     lua.eval("ChatBridge.ApplyPreset")(b"team")
     assert lua.eval("ChatBridgeDB.subs.P") is True and lua.eval("ChatBridgeDB.subs.G") is False
 

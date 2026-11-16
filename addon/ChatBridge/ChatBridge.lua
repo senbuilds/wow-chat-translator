@@ -10,7 +10,7 @@
 ChatBridge = {}
 local CB = ChatBridge
 
-CB.VERSION = "2.5"
+CB.VERSION = "2.6"
 CB.COLS, CB.ROWS, CB.CELL, CB.HEADER = 64, 8, 4, 8
 CB.MAX_PAYLOAD = math.floor((CB.COLS * CB.ROWS - CB.HEADER) * 6 / 8) - 5
 CB.HOLD = 0.25          -- 每条消息的色块显示秒数
@@ -501,7 +501,8 @@ local function buildPage()
     note:SetJustifyH("LEFT")
     note:SetWordWrap(false)
     -- 这句提示一直画着，但翻译程序开着时会被它的同色遮片盖住，所以只有程序没开时才看得见
-    note:SetText("翻译程序没开：打开桌面「魔兽聊天翻译」点启动")
+    -- 从 CurseForge 只装了插件的人也要看得懂：没装程序就去官网下载（只给地址，不提钱）
+    note:SetText("没开翻译程序？下载 wow.husen.ca")
 
     -- 滚轮翻看之前的译文（译文由小程序显示，这里把滚动转给它）
     panel:EnableMouseWheel(true)
@@ -766,6 +767,10 @@ events:SetScript("OnEvent", function(_, event, ...)
         sendRect(true)
         CB.Announce()
         print(PREFIX .. "已加载。点「翻译」看译文（按钮和翻译页都能拖）；打中文后按 Ctrl+T 翻成英文。/cb 看更多。")
+        if not ChatBridgeDB.welcomed then        -- 第一次装：说清楚还要一个电脑程序（CurseForge 上只有插件）
+            ChatBridgeDB.welcomed = true
+            print(PREFIX .. "这个插件要配合电脑上的免费翻译程序使用（Windows）。还没装的话去 wow.husen.ca 下载，打开后点「启动」。")
+        end
     elseif event == "LOADING_SCREEN_DISABLED" then
         CB.Announce()
     elseif event == "DISPLAY_SIZE_CHANGED" or event == "UI_SCALE_CHANGED" then
@@ -837,5 +842,6 @@ SlashCmdList.CHATBRIDGE = function(msg)
             .. "（右键聊天框上的「翻译」按钮可以改）")
         print(PREFIX .. "发消息: 聊天框里打中文，按 Ctrl+T（或末尾打 ;;），等一下再 Ctrl+V、回车。")
         print(PREFIX .. "命令: /cb config | /cb usage | /cb account | /cb page | /cb reset | /cb team | /cb all | /cb test | /cb on | /cb off")
+        print(PREFIX .. "翻译由电脑上的免费程序完成，下载：wow.husen.ca")
     end
 end
