@@ -31,6 +31,8 @@ elif FROZEN:
     CONFIG_PATH = os.path.join(os.environ.get("APPDATA", HERE), "WoWChatTranslator", "config.json")
 else:
     CONFIG_PATH = os.path.join(HERE, "config.json")
+# 翻译进程每几秒写一次自己的状态（游戏 / 插件连上没有、收到几条），启动器读它做诊断。只有数字，不含聊天内容
+STATUS_PATH = os.path.join(os.path.dirname(CONFIG_PATH), "status.json")
 WOW_TITLES = ("魔兽世界", "World of Warcraft")
 FONT = "Microsoft YaHei UI"
 
@@ -298,10 +300,10 @@ class Relay:
                 self.trial_expires = data.get("trial_expires")
             self.no_balance = self.balance <= 0 and self.trial_left <= 0
 
-    def account(self):
-        """返回 (账户信息, 错误说明)。"""
+    def account(self, state=None):
+        """返回 (账户信息, 错误说明)。state：顺带报给服务器的连接状态（X-CB-State 头，只有数字）。"""
         try:
-            info = self._request("/account", timeout=6)
+            info = self._request("/account", timeout=6, headers={"X-CB-State": state} if state else None)
             self._note_balance(info)
             return info, None
         except Exception:
@@ -321,9 +323,22 @@ class Relay:
         except Exception:
             return None, "连不上翻译服务"
 
-    def _request(self, path, body=None, timeout=10):
+    def feedback(self, payload):
+        """提交反馈。返回 (编号, 错误说明)。"""
+        try:
+            return self._request("/feedback/submit", payload, timeout=15).get("id") or "?", None
+        except urllib.error.HTTPError as e:
+            try:
+                return None, json.loads(e.read().decode("utf-8")).get("error") or "提交失败 %d" % e.code
+            except Exception:
+                return None, "提交失败 %d" % e.code
+        except Exception:
+            return None, "连不上服务器"
+
+    def _request(self, path, body=None, timeout=10, headers=None):
         url = self.cfg["endpoint"].rstrip("/") + path
-        headers = {"Authorization": "Bearer " + (self.cfg.get("token") or self.cfg.get("device_id", ""))}
+        headers = dict(headers or {})
+        headers["Authorization"] = "Bearer " + (self.cfg.get("token") or self.cfg.get("device_id", ""))
         data = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
@@ -477,6 +492,10 @@ class Overlay:
         self.docked = None
         self.placed = None
         self.game_gone_since = None
+        # 给诊断用的计数（只有数字）：收到几条聊天、翻了几条、出错几次、按频道和错误原因分
+        self.stats = {"chat": 0, "tr": 0, "err": 0, "secret": 0, "nobal": 0, "addon_ver": "", "last_chat": 0,
+                      "chan": {}, "errs": {}, "started": int(time.time())}
+        self.status_written = 0.0
 
         root = self.root = tk.Tk()
         root.title("魔兽聊天翻译")
@@ -761,6 +780,17 @@ class Overlay:
                         if len(hexcolor) == 6 and all(c in "0123456789abcdefABCDEF" for c in hexcolor):
                             name_tag = "cls" + hexcolor.lower()
                             self.log.tag_configure(name_tag, foreground="#" + hexcolor.lower())
+                    st = self.stats
+                    st["chat"] += 1
+                    st["last_chat"] = int(time.time())
+                    st["chan"][code] = st["chan"].get(code, 0) + 1
+                    if translated:
+                        st["tr"] += 1
+                    elif err:
+                        st["err"] += 1
+                        st["errs"][err[:20]] = st["errs"].get(err[:20], 0) + 1
+                        if err == NO_BALANCE:
+                            st["nobal"] += 1
                     pieces = [("[%s] " % label, "ch" + code), (sender, name_tag), (": ", "name")]
                     if translated:
                         pieces.append((translated + "\n", ()))
@@ -775,11 +805,13 @@ class Overlay:
                         self._tell_no_balance()
                 elif kind == "hello":
                     # 插件登录、过加载画面时会连着打好几次招呼；同一个角色和版本只提示一次
+                    self.stats["addon_ver"] = str(item[1])[:12]
                     hello = (item[2], item[1])
                     if hello != getattr(self, "last_hello", None):
                         self.last_hello = hello
                         self._append([("已连上游戏，角色 %s，插件 v%s" % (item[2], item[1]), "note")])
                 elif kind == "secret":
+                    self.stats["secret"] += 1
                     label, _ = CHANNELS.get(item[1], ("?", FG))
                     self._append([("[%s] 有新消息，但游戏在副本限制期间不让插件读取内容。" % label, "note")])
                 elif kind == "dock":
@@ -1090,6 +1122,8 @@ class Overlay:
             parts.append("翻译服务正常")
         self.dot.configure(fg=color)
         self.status.configure(text=" · ".join(parts))
+        if time.time() - self.status_written > 5:
+            self._write_status()
         # 贴合模式没有状态栏：翻译服务断了或恢复时在记录里说一声
         if self.relay_ok is not None and self.relay_ok != self.relay_reported:
             if self.relay_reported is not None or not self.relay_ok:
@@ -1097,6 +1131,20 @@ class Overlay:
                               else ("翻译服务恢复了。", "note")])
             self.relay_reported = self.relay_ok
         self.root.after(1000, self._refresh_status)
+
+    def _write_status(self):
+        """把连接状态写给启动器（反馈诊断、匿名连接统计都从这里来）。"""
+        self.status_written = time.time()
+        st = dict(self.stats, at=int(time.time()), pid=os.getpid(), win=bool(self.capture.window_ok),
+                  addon=bool(self.game_seen), relay_ok=self.relay_ok, docked=bool(self.docked),
+                  dock_shown=bool(self.dock and self.dock[0]))
+        try:
+            tmp = STATUS_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(st, f, ensure_ascii=False)
+            os.replace(tmp, STATUS_PATH)
+        except OSError:
+            pass
 
     def quit(self):
         self._remember_geometry()

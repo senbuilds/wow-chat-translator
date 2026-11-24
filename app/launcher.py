@@ -7,6 +7,7 @@ import ctypes
 import hashlib
 import json
 import os
+import platform
 import queue
 import re
 import shutil
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 import urllib.error
 import urllib.request
@@ -31,12 +33,32 @@ ADDON = "ChatBridge"
 FONT = "Microsoft YaHei UI"
 
 DEVICE_RE = re.compile(r"^d_[0-9a-f]{32}$")
+EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$")
+FEEDBACK_KINDS = [("no_translate", "装好了但不翻译 / 看不到译文"), ("connect", "连不上游戏或翻译服务"),
+                  ("billing", "充值、兑换码、余额"), ("wrong_translation", "翻译不对 / 黑话翻错"),
+                  ("suggestion", "功能建议"), ("other", "其他")]
 
-# 配色：深色石板 + 金色描边 + 暗红按钮（只是风格，不使用任何游戏素材）
-BG, PANEL, EDGE = "#100c09", "#1c1510", "#7a5f24"
-GOLD, GOLD_DIM, TEXT, DIM = "#ffd100", "#c9a44c", "#eadfc6", "#8d8268"
-BTN, BTN_HOVER, BTN_DOWN, BTN_OFF = "#6b1010", "#8c1818", "#4a0a0a", "#2b2520"
-GOOD, BAD, WARN = "#4fd15a", "#ff5f4d", "#f0b030"
+# 配色和官网一致（参考国服官网）：深棕底、金色只给小标题、羊皮纸色正文、细线分隔、平的按钮
+BG, PANEL, EDGE = "#170e09", "#170e09", "#4a3b30"        # PANEL 和底色一样：分区靠细线，不靠框
+FIELD = "#120b07"                                        # 输入框底色
+GOLD, GOLD_DIM, TEXT, DIM, WHITE = "#edaf00", "#edaf00", "#ebdec2", "#b1997f", "#ffffff"
+BTN, BTN_HOVER, BTN_DOWN = "#aa2409", "#c22c0c", "#8a1d07"   # 主按钮：红底白字
+SEC, SEC_HOVER, SEC_DOWN = "#2a1e15", "#3a2a1d", "#22170f"   # 次按钮：深棕底
+BTN_OFF, OFF_TEXT, OFF_EDGE = "#211710", "#6f604f", "#2e241c"
+GOOD, BAD, WARN = "#8fc46a", "#e8664f", "#edaf00"
+
+
+def dark_titlebar(win):
+    """Windows 10/11 的标题栏改成深色，和窗口里面一致。不支持的系统什么也不做。"""
+    try:
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+        on = ctypes.c_int(1)
+        for attr in (20, 19):                    # DWMWA_USE_IMMERSIVE_DARK_MODE（新 / 旧编号）
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(on), ctypes.sizeof(on)) == 0:
+                break
+    except Exception:
+        pass
 
 
 def resource(*parts):
@@ -185,17 +207,18 @@ def desktop_dir():
 # ---------------------------------------------------------------------------
 
 class WowButton(tk.Frame):
-    """暗红底、金边、金字的按钮。"""
+    """平的按钮。primary=True：红底白字（每块里最主要的那个操作）；否则深棕底、细线边。"""
 
-    def __init__(self, parent, text, command, width=9):
-        super().__init__(parent, bg=EDGE, padx=1, pady=1)
+    def __init__(self, parent, text, command, width=9, primary=False):
+        self.colors = (BTN, BTN_HOVER, BTN_DOWN, WHITE, BTN) if primary else (SEC, SEC_HOVER, SEC_DOWN, TEXT, EDGE)
+        super().__init__(parent, bg=self.colors[4], padx=1, pady=1)
         self.command, self.enabled = command, True
-        self.face = tk.Label(self, text=text, bg=BTN, fg=GOLD, font=(FONT, 10, "bold"), width=width, pady=4,
-                             cursor="hand2")
+        self.face = tk.Label(self, text=text, bg=self.colors[0], fg=self.colors[3], font=(FONT, 10, "bold"),
+                             width=width, pady=5, cursor="hand2")
         self.face.pack()
-        self.face.bind("<Enter>", lambda e: self._paint(BTN_HOVER))
-        self.face.bind("<Leave>", lambda e: self._paint(BTN))
-        self.face.bind("<ButtonPress-1>", lambda e: self._paint(BTN_DOWN))
+        self.face.bind("<Enter>", lambda e: self._paint(self.colors[1]))
+        self.face.bind("<Leave>", lambda e: self._paint(self.colors[0]))
+        self.face.bind("<ButtonPress-1>", lambda e: self._paint(self.colors[2]))
         self.face.bind("<ButtonRelease-1>", self._click)
 
     def _paint(self, color):
@@ -204,7 +227,7 @@ class WowButton(tk.Frame):
 
     def _click(self, event):
         if self.enabled:
-            self.face.configure(bg=BTN_HOVER)
+            self.face.configure(bg=self.colors[1])
             inside = 0 <= event.x <= self.face.winfo_width() and 0 <= event.y <= self.face.winfo_height()
             if inside:
                 self.command()
@@ -214,17 +237,16 @@ class WowButton(tk.Frame):
             self.face.configure(text=text)
         if enabled is not None:
             self.enabled = enabled
-            self.face.configure(bg=BTN if enabled else BTN_OFF, fg=GOLD if enabled else DIM,
+            self.face.configure(bg=self.colors[0] if enabled else BTN_OFF, fg=self.colors[3] if enabled else OFF_TEXT,
                                 cursor="hand2" if enabled else "arrow")
-            self.configure(bg=EDGE if enabled else "#3a3226")
+            self.configure(bg=self.colors[4] if enabled else OFF_EDGE)
 
 
 def panel(parent, title):
-    """金色细边的面板，返回里面可以放东西的 Frame。"""
-    outer = tk.Frame(parent, bg=EDGE, padx=1, pady=1)
-    outer.pack(fill="x", pady=(0, 10))
-    inner = tk.Frame(outer, bg=PANEL, padx=14, pady=10)
-    inner.pack(fill="both", expand=True)
+    """一块内容：上面一条细线，金色小标题。返回里面可以放东西的 Frame。"""
+    tk.Frame(parent, bg=EDGE, height=1).pack(fill="x")
+    inner = tk.Frame(parent, bg=PANEL, pady=10)
+    inner.pack(fill="x", pady=(0, 8))
     tk.Label(inner, text=title, bg=PANEL, fg=GOLD_DIM, font=(FONT, 10, "bold"), anchor="w").pack(fill="x", pady=(0, 6))
     return inner
 
@@ -246,6 +268,7 @@ class Launcher:
 
         root = self.root = tk.Tk()
         root.title(APP_NAME)
+        dark_titlebar(root)
         root.configure(bg=BG)
         root.resizable(False, False)
         try:
@@ -257,9 +280,11 @@ class Launcher:
         body = tk.Frame(root, bg=BG, padx=int(18 * k), pady=int(14 * k))
         body.pack(fill="both", expand=True)
 
-        tk.Label(body, text=APP_NAME, bg=BG, fg=GOLD, font=(FONT, 20, "bold")).pack(anchor="w")
-        tk.Label(body, text="队友的英文自动变中文 · 打中文按 Ctrl+T 变英文", bg=BG, fg=DIM,
-                 font=(FONT, 9)).pack(anchor="w", pady=(0, 12))
+        head = tk.Frame(body, bg=BG)
+        head.pack(fill="x", pady=(0, 14))
+        tk.Label(head, text=APP_NAME, bg=BG, fg=WHITE, font=(FONT, 18, "bold")).pack(side="left")
+        tk.Label(head, text="ChatBridge Translator", bg=BG, fg=DIM, font=(FONT, 9, "bold")).pack(side="left",
+                                                                                               padx=(10, 0), pady=(8, 0))
 
         # --- 游戏目录和插件 ---
         p = panel(body, "游戏目录")
@@ -270,9 +295,9 @@ class Launcher:
         row.pack(fill="x", pady=(6, 0))
         self.flavor = tk.StringVar()
         self.flavor_menu = tk.OptionMenu(row, self.flavor, "")
-        self.flavor_menu.configure(bg=BTN_OFF, fg=TEXT, activebackground=BTN, activeforeground=GOLD, relief="flat",
+        self.flavor_menu.configure(bg=SEC, fg=TEXT, activebackground=SEC_HOVER, activeforeground=WHITE, relief="flat",
                                    highlightthickness=1, highlightbackground=EDGE, font=(FONT, 9), width=14)
-        self.flavor_menu["menu"].configure(bg=PANEL, fg=TEXT, activebackground=BTN, activeforeground=GOLD, font=(FONT, 9))
+        self.flavor_menu["menu"].configure(bg=SEC, fg=TEXT, activebackground=BTN, activeforeground=WHITE, font=(FONT, 9))
         self.flavor_menu.pack(side="left")
         WowButton(row, "浏览…", self.browse, width=7).pack(side="right")
         row = tk.Frame(p, bg=PANEL)
@@ -293,7 +318,7 @@ class Launcher:
         self.run_label.pack(side="left", padx=(6, 0))
         self.stop_button = WowButton(row, "停止", self.stop, width=7)
         self.stop_button.pack(side="right")
-        self.start_button = WowButton(row, "启动", self.start, width=7)
+        self.start_button = WowButton(row, "启动", self.start, width=7, primary=True)
         self.start_button.pack(side="right", padx=(0, 8))
         self.run_hint = tk.Label(p, text="", bg=PANEL, fg=DIM, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
         self.run_hint.pack(fill="x", pady=(6, 0))
@@ -306,12 +331,12 @@ class Launcher:
         row.pack(fill="x", pady=(8, 0))
         box = tk.Frame(row, bg=EDGE, padx=1, pady=1)
         box.pack(side="left", fill="x", expand=True)
-        self.cdk = tk.Entry(box, bg="#0c0907", fg=TEXT, insertbackground=GOLD, relief="flat", font=("Consolas", 11))
+        self.cdk = tk.Entry(box, bg=FIELD, fg=TEXT, insertbackground=GOLD, relief="flat", font=("Consolas", 11))
         self.cdk.pack(fill="x", ipady=5, padx=1)
         self.cdk.bind("<Return>", lambda e: self.redeem())
-        self.redeem_button = WowButton(row, "兑换 CDK", self.redeem, width=9)
+        self.redeem_button = WowButton(row, "兑换", self.redeem, width=7, primary=True)
         self.redeem_button.pack(side="right", padx=(8, 0))
-        self.cdk_msg = tk.Label(p, text="在上面粘贴兑换码后点「兑换」。游戏里翻译页的「用量」能看到还能翻多少条。", bg=PANEL, fg=DIM,
+        self.cdk_msg = tk.Label(p, text="粘贴兑换码后点「兑换」。剩余条数在游戏翻译页的「用量」里看。", bg=PANEL, fg=DIM,
                                 font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
         self.cdk_msg.pack(fill="x", pady=(6, 0))
         row = tk.Frame(p, bg=PANEL)
@@ -320,9 +345,9 @@ class Launcher:
         WowButton(row, "找回余额", self.open_recover, width=9).pack(side="right", padx=(0, 8))
         # 新电脑：领免费 200 条（服务器说没领过才显示）
         self.trial_row = tk.Frame(p, bg=PANEL)
-        self.trial_button = WowButton(self.trial_row, "领取免费 200 条", self.claim_trial, width=14)
+        self.trial_button = WowButton(self.trial_row, "领取免费 200 条", self.claim_trial, width=14, primary=True)
         self.trial_button.pack(side="left")
-        tk.Label(self.trial_row, text="每台电脑一次，点一下网页上的验证就到账", bg=PANEL, fg=DIM, font=(FONT, 9),
+        tk.Label(self.trial_row, text="每台电脑能领一次，网页上验证一下就到账", bg=PANEL, fg=DIM, font=(FONT, 9),
                  anchor="w").pack(side="left", padx=(8, 0))
         self.trial_polls = 0
         self.mode_label = tk.Label(row, text="", bg=PANEL, fg=DIM, font=(FONT, 9), anchor="w", justify="left",
@@ -334,6 +359,7 @@ class Launcher:
         row.pack(fill="x", pady=(0, 4))
         self.update_button = WowButton(row, "检查更新", self.update_action, width=9)
         self.update_button.pack(side="right")
+        WowButton(row, "反馈问题", self.open_feedback, width=9).pack(side="right", padx=(0, 8))
         self.update_label = tk.Label(row, text="版本 %s" % APP_VERSION, bg=BG, fg=DIM, font=(FONT, 9), anchor="w",
                                      justify="left", wraplength=int(300 * k))
         self.update_label.pack(side="left", fill="x", expand=True)
@@ -342,7 +368,7 @@ class Launcher:
         self.footer.pack(fill="x")
         self.device_label = None
         if not self.cfg.get("token"):
-            self.device_label = tk.Label(body, text="设备编号 %s  （点这里复制；换电脑时凭它找回余额）" % self.cfg.get("device_id", ""),
+            self.device_label = tk.Label(body, text="设备编号 %s · 点击复制" % self.cfg.get("device_id", ""),
                                          bg=BG, fg=DIM, font=(FONT, 8), anchor="w", cursor="hand2", wraplength=wrap,
                                          justify="left")
             self.device_label.pack(fill="x")
@@ -478,10 +504,10 @@ class Launcher:
         self.start_button.set(enabled=not on)
         self.stop_button.set(enabled=on)
         if on:
-            self.run_hint.configure(text="进游戏后点聊天框上的「翻译」按钮看译文。这个窗口可以最小化，别关。", fg=DIM)
+            self.run_hint.configure(text="进游戏后点聊天框上的「翻译」看译文。这个窗口可以最小化，但别关。", fg=DIM)
         elif self.proc is not None:
             self.proc = None
-            self.run_hint.configure(text="翻译已停止（关掉游戏一分钟后会自动停）。要用时再点「启动」。", fg=DIM)
+            self.run_hint.configure(text="翻译已停止（游戏关掉一分钟后会自动停）。下次玩之前再点「启动」。", fg=DIM)
         elif not self.run_hint.cget("text"):
             self.run_hint.configure(text="每次玩之前点「启动」，然后进游戏。", fg=DIM)
 
@@ -493,8 +519,29 @@ class Launcher:
     def background(self, kind, fn):
         threading.Thread(target=lambda: self.events.put((kind,) + tuple(fn())), daemon=True).start()
 
+    def read_status(self):
+        """翻译进程写的状态（几秒一次）。翻译没在跑或者状态太旧就返回 None。"""
+        if not self.running():
+            return None
+        try:
+            with open(app.STATUS_PATH, encoding="utf-8") as f:
+                st = json.load(f)
+        except (OSError, ValueError):
+            return None
+        return st if time.time() - st.get("at", 0) < 60 else None
+
+    def state_header(self):
+        """顺带报给服务器的匿名连接状态：只有版本和几个数字，用来统计「装了但没连上」的有多少。"""
+        st = self.read_status()
+        parts = ["v=" + APP_VERSION, "run=%d" % (1 if st else 0)]
+        if st:
+            parts += ["win=%d" % bool(st.get("win")), "addon=%d" % bool(st.get("addon")),
+                      "chat=%d" % int(st.get("chat", 0)), "tr=%d" % int(st.get("tr", 0)),
+                      "err=%d" % int(st.get("err", 0)), "nobal=%d" % int(st.get("nobal", 0))]
+        return ";".join(parts)
+
     def refresh_account(self):
-        self.background("account", self.relay.account)
+        self.background("account", lambda: self.relay.account(self.state_header()))
         self.root.after(60000, self.refresh_account)
 
     def refresh_service(self):
@@ -574,7 +621,7 @@ class Launcher:
             text = "余额 %s%.2f" % (self.relay.currency, left)
             if self.relay.trial_left > 0:
                 text += " · 免费试用剩 %d 条" % self.relay.trial_left
-            self.balance_label.configure(text=text, fg=GOOD if self.relay.balance > 0 or self.relay.trial_left > 0 else BAD)
+            self.balance_label.configure(text=text, fg=WHITE if self.relay.balance > 0 or self.relay.trial_left > 0 else BAD)
         # 「领取免费 200 条」：线上服务、没领过才显示
         show = (not self.relay.own and not self.relay.unlimited and self.relay.trial_claimed is False)
         if show and not self.trial_row.winfo_ismapped():
@@ -622,6 +669,97 @@ class Launcher:
         self.background("redeemed", lambda: self.relay.redeem(code))
 
     # --- 对话框：找回余额、自带模型 ---
+    # --- 反馈 ---
+    def diagnostics(self):
+        """反馈时附带的诊断信息：版本、游戏和插件状态、各频道收到几条。没有聊天内容、没有角色名。"""
+        flavor = self.flavor.get()
+        installed = (toc_version(os.path.join(addon_dir(self.game_dir, flavor), ADDON + ".toc"))
+                     if self.game_dir and flavor else None)
+        d = {"app": APP_VERSION, "os": ("%s %s" % (platform.system(), platform.version()))[:40],
+             "game_dir_found": bool(self.game_dir), "flavor": flavor[:20], "addon_installed": installed or "",
+             "addon_bundled": toc_version(resource("addon", ADDON, ADDON + ".toc")) or "",
+             "overlay_running": self.running(), "service_ok": bool(self.service_ok), "own_model": bool(self.relay.own),
+             "has_balance": bool((self.relay.balance or 0) > 0), "trial_left": int(self.relay.trial_left or 0),
+             "trial_claimed": bool(self.relay.trial_claimed), "scale": round(self.k, 2)}
+        st = self.read_status()
+        if st:
+            d.update(game_window=bool(st.get("win")), addon_signal=bool(st.get("addon")),
+                     addon_version=str(st.get("addon_ver", ""))[:12], chats_seen=int(st.get("chat", 0)),
+                     translated=int(st.get("tr", 0)), errors=int(st.get("err", 0)), secret=int(st.get("secret", 0)),
+                     docked=bool(st.get("docked")), dock_shown=bool(st.get("dock_shown")),
+                     minutes_running=int((time.time() - st.get("started", time.time())) / 60),
+                     minutes_since_chat=int((time.time() - st["last_chat"]) / 60) if st.get("last_chat") else -1,
+                     by_channel=st.get("chan") or {}, by_error=st.get("errs") or {})
+        return d
+
+    def open_feedback(self):
+        win, body = self.dialog("反馈问题")
+        wrap = int(380 * self.k)
+        tk.Label(body, text="说说遇到的问题，或者想要的功能。", bg=BG, fg=DIM, font=(FONT, 9),
+                 anchor="w").pack(fill="x")
+        tk.Label(body, text="问题类型", bg=BG, fg=TEXT, font=(FONT, 9), anchor="w").pack(fill="x", pady=(8, 2))
+        kind = tk.StringVar(value=FEEDBACK_KINDS[0][1])
+        menu = tk.OptionMenu(body, kind, *[label for _, label in FEEDBACK_KINDS])
+        menu.configure(bg=SEC, fg=TEXT, activebackground=SEC_HOVER, activeforeground=WHITE, relief="flat",
+                       highlightthickness=1, highlightbackground=EDGE, font=(FONT, 9), anchor="w")
+        menu["menu"].configure(bg=SEC, fg=TEXT, activebackground=BTN, activeforeground=WHITE, font=(FONT, 9))
+        menu.pack(fill="x")
+        tk.Label(body, text="具体情况（什么时候、在做什么、看到了什么）", bg=BG, fg=TEXT, font=(FONT, 9),
+                 anchor="w").pack(fill="x", pady=(8, 2))
+        box = tk.Frame(body, bg=EDGE, padx=1, pady=1)
+        box.pack(fill="x")
+        text = tk.Text(box, bg=FIELD, fg=TEXT, insertbackground=GOLD, relief="flat", font=(FONT, 10),
+                       width=46, height=6, wrap="word")
+        text.pack(fill="x", padx=1, pady=1)
+        contact = self.field(body, "邮箱（选填，方便我们回复你）")
+        with_diag = tk.BooleanVar(value=True)
+        tk.Checkbutton(body, text="附带诊断信息：版本、游戏和插件的连接情况、各频道收到的消息数。不含聊天内容和角色名。",
+                       variable=with_diag, bg=BG, fg=TEXT, selectcolor=FIELD, activebackground=BG,
+                       activeforeground=GOLD, font=(FONT, 9), anchor="w", wraplength=wrap,
+                       justify="left").pack(fill="x", pady=(8, 0))
+        msg = tk.Label(body, text="", bg=BG, fg=DIM, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
+        msg.pack(fill="x", pady=(6, 0))
+        row = tk.Frame(body, bg=BG)
+        row.pack(fill="x", pady=(10, 0))
+
+        def send():
+            content = text.get("1.0", "end").strip()
+            if len(content) < 2:
+                msg.configure(text="请写一下遇到了什么问题。", fg=BAD)
+                return
+            email = contact.get().strip()
+            if email and not EMAIL_RE.match(email):
+                msg.configure(text="邮箱格式不对（不想留可以空着）。", fg=BAD)
+                return
+            code = next((c for c, label in FEEDBACK_KINDS if label == kind.get()), "other")
+            payload = {"kind": code, "text": content[:2000], "contact": email[:120],
+                       "version": APP_VERSION}
+            if with_diag.get():
+                payload["diag"] = self.diagnostics()
+            send_button.set(enabled=False)
+            msg.configure(text="正在发送…", fg=DIM)
+            self.background("feedback_sent", lambda: self.relay.feedback(payload) + (win, msg, send_button))
+
+        send_button = WowButton(row, "发送", send, width=7, primary=True)
+        send_button.pack(side="right")
+        WowButton(row, "取消", win.destroy, width=7).pack(side="right", padx=(0, 8))
+        tk.Label(row, text="网页版：wow.husen.ca/feedback", bg=BG, fg=DIM, font=(FONT, 8),
+                 anchor="w").pack(side="left")
+        self.center(win)
+        text.focus_set()
+        self.feedback_win = win
+        return win, text, contact, msg
+
+    def on_feedback_sent(self, fid, err, win, msg, button):
+        if not win.winfo_exists():
+            return
+        if fid:
+            msg.configure(text="已收到，编号 %s。留了邮箱的话，我们会回复你。" % fid, fg=GOOD)
+            win.after(3000, win.destroy)
+        else:
+            button.set(enabled=True)
+            msg.configure(text="没发出去：%s" % err, fg=BAD)
+
     def dialog(self, title):
         k = self.k
         win = tk.Toplevel(self.root)
@@ -629,20 +767,21 @@ class Launcher:
         win.configure(bg=BG)
         win.resizable(False, False)
         win.transient(self.root)
+        dark_titlebar(win)
         try:
             win.iconbitmap(resource("assets", "icon.ico"))
         except tk.TclError:
             pass
         body = tk.Frame(win, bg=BG, padx=int(18 * k), pady=int(14 * k))
         body.pack(fill="both", expand=True)
-        tk.Label(body, text=title, bg=BG, fg=GOLD, font=(FONT, 14, "bold"), anchor="w").pack(fill="x", pady=(0, 6))
+        tk.Label(body, text=title, bg=BG, fg=WHITE, font=(FONT, 14, "bold"), anchor="w").pack(fill="x", pady=(0, 6))
         return win, body
 
     def field(self, parent, label, value="", show=None):
         tk.Label(parent, text=label, bg=BG, fg=TEXT, font=(FONT, 9), anchor="w").pack(fill="x", pady=(8, 2))
         box = tk.Frame(parent, bg=EDGE, padx=1, pady=1)
         box.pack(fill="x")
-        e = tk.Entry(box, bg="#0c0907", fg=TEXT, insertbackground=GOLD, relief="flat", font=("Consolas", 10),
+        e = tk.Entry(box, bg=FIELD, fg=TEXT, insertbackground=GOLD, relief="flat", font=("Consolas", 10),
                      width=46, show=show or "")
         e.pack(fill="x", ipady=4, padx=1)
         e.insert(0, value)
@@ -708,13 +847,13 @@ class Launcher:
             app.save_config(self.cfg)
             self.relay.balance, self.relay.no_balance = None, False
             if self.device_label is not None:
-                self.device_label.configure(text="设备编号 %s  （点这里复制；换电脑时凭它找回余额）" % new)
+                self.device_label.configure(text="设备编号 %s · 点击复制" % new)
             self.refresh_account_now()
             self.restart_overlay()
             self.cdk_msg.configure(text="已换成原来的设备编号。之前这台的编号存在配置里，换错了可以再换回来：%s" % old, fg=GOOD)
             win.destroy()
 
-        switch = WowButton(row, "换成这个编号", do_switch, width=11)
+        switch = WowButton(row, "换成这个编号", do_switch, width=11, primary=True)
         switch.pack(side="right")
         switch.set(enabled=False)
         WowButton(row, "查询余额", check, width=9).pack(side="right", padx=(0, 8))
@@ -753,7 +892,7 @@ class Launcher:
         model = self.field(body, "模型名（例如 gpt-4o-mini、deepseek-chat、qwen2.5:7b）", m.get("model", ""))
         on = tk.BooleanVar(value=bool(m.get("enabled")))
         tk.Checkbutton(body, text="使用自带模型（取消勾选就回到线上翻译服务）", variable=on, bg=BG, fg=TEXT,
-                       selectcolor=PANEL, activebackground=BG, activeforeground=GOLD, font=(FONT, 9),
+                       selectcolor=FIELD, activebackground=BG, activeforeground=GOLD, font=(FONT, 9),
                        anchor="w").pack(fill="x", pady=(10, 0))
         msg = tk.Label(body, text="", bg=BG, fg=DIM, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
         msg.pack(fill="x", pady=(8, 0))
@@ -794,7 +933,7 @@ class Launcher:
             self.restart_overlay()
             win.destroy()
 
-        WowButton(row, "保存", save, width=7).pack(side="right")
+        WowButton(row, "保存", save, width=7, primary=True).pack(side="right")
         WowButton(row, "测试", test, width=7).pack(side="right", padx=(0, 8))
         self.center(win)
 
@@ -824,6 +963,8 @@ class Launcher:
                     text, err, msg = item[1], item[2], item[3]
                     if msg.winfo_exists():
                         msg.configure(text=("能用：%s" % text) if text else ("不能用：%s" % err), fg=GOOD if text else BAD)
+                elif item[0] == "feedback_sent":
+                    self.on_feedback_sent(*item[1:])
                 elif item[0] == "trial_started":
                     self.on_trial_started(item[1], item[2])
                 elif item[0] == "service":
@@ -841,7 +982,7 @@ class Launcher:
                     self.show_balance()
         except queue.Empty:
             pass
-        service = {None: "翻译服务：连接中…", True: "翻译服务：正常", False: "翻译服务：连不上（检查网络，或稍后再试）"}[self.service_ok]
+        service = {None: "翻译服务：连接中…", True: "翻译服务：正常", False: "翻译服务：连不上，请检查网络或稍后再试"}[self.service_ok]
         self.footer.configure(text=service, fg=BAD if self.service_ok is False else DIM)
         self.root.after(200, self.pump)
 

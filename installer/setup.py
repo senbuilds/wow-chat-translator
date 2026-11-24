@@ -28,14 +28,18 @@ except ImportError:
 EXE = "WoWTranslator.exe"
 REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\WoWChatTranslator"
 FONT = "Microsoft YaHei UI"
-BG, PANEL, EDGE = "#100c09", "#1c1510", "#7a5f24"
-GOLD, GOLD_DIM, TEXT, DIM = "#ffd100", "#c9a44c", "#eadfc6", "#8d8268"
-BTN, BTN_HOVER, BTN_OFF = "#6b1010", "#8c1818", "#2b2520"
-GOOD, BAD = "#4fd15a", "#ff5f4d"
+# 配色和官网、启动器一致：深棕底、金色小标题、羊皮纸色正文、细线分隔、平的按钮
+BG, PANEL, EDGE = "#170e09", "#170e09", "#4a3b30"
+GOLD, GOLD_DIM, TEXT, DIM, WHITE = "#edaf00", "#edaf00", "#ebdec2", "#b1997f", "#ffffff"
+BTN, BTN_HOVER = "#aa2409", "#c22c0c"           # 主按钮：红底白字
+SEC, SEC_HOVER = "#2a1e15", "#3a2a1d"           # 次按钮：深棕底、细线边
+BTN_OFF, OFF_TEXT, OFF_EDGE = "#211710", "#6f604f", "#2e241c"
+GOOD, BAD = "#8fc46a", "#e8664f"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 PRIVACY_URL = "https://wow.husen.ca/privacy.html"
-PRIVACY_TEXT = ("默认用线上翻译服务：要翻的那一句话和一个匿名设备编号会发到 wow.husen.ca，服务器不保存聊天内容。"
-                "不想经过我们的服务器：打开后在启动器里点「自带模型」，聊天只发往你自己填的地址。")
+PRIVACY_TEXT = ("默认使用线上翻译：要翻译的那句话和一个匿名设备编号会发到 wow.husen.ca，服务器不保存聊天内容。"
+                "程序还会报几项匿名数字（版本、连接状态、消息条数），用来排查装好后用不了的问题。"
+                "不想经过我们的服务器，可以在启动器里改用「自带模型」。")
 
 
 def resource(name):
@@ -157,6 +161,13 @@ class Wizard:
     def __init__(self):
         root = self.root = tk.Tk()
         root.title(APP_NAME + " 安装")
+        try:                                      # 标题栏用深色（Windows 10/11），不支持就算了
+            root.update_idletasks()
+            on = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(ctypes.windll.user32.GetParent(root.winfo_id()), 20,
+                                                       ctypes.byref(on), ctypes.sizeof(on))
+        except Exception:
+            pass
         root.configure(bg=BG)
         root.resizable(False, False)
         try:
@@ -167,30 +178,30 @@ class Wizard:
         wrap = int(400 * k)
         body = tk.Frame(root, bg=BG, padx=int(20 * k), pady=int(16 * k))
         body.pack()
-        tk.Label(body, text=APP_NAME, bg=BG, fg=GOLD, font=(FONT, 20, "bold")).pack(anchor="w")
-        tk.Label(body, text="安装程序 · 版本 %s" % APP_VERSION, bg=BG, fg=DIM, font=(FONT, 9)).pack(anchor="w", pady=(0, 12))
-
-        outer = tk.Frame(body, bg=EDGE, padx=1, pady=1)
-        outer.pack(fill="x")
-        p = tk.Frame(outer, bg=PANEL, padx=14, pady=12)
-        p.pack(fill="both")
+        tk.Label(body, text=APP_NAME, bg=BG, fg=WHITE, font=(FONT, 18, "bold")).pack(anchor="w")
+        tk.Label(body, text="ChatBridge Translator · 安装 %s 版" % APP_VERSION, bg=BG, fg=DIM,
+                 font=(FONT, 9, "bold")).pack(anchor="w", pady=(0, 14))
+        tk.Frame(body, bg=EDGE, height=1).pack(fill="x")
+        p = tk.Frame(body, bg=PANEL, pady=12)
+        p.pack(fill="x")
         tk.Label(p, text="安装到", bg=PANEL, fg=GOLD_DIM, font=(FONT, 10, "bold"), anchor="w").pack(fill="x")
         self.dir = tk.StringVar(value=default_dir())
         tk.Label(p, textvariable=self.dir, bg=PANEL, fg=TEXT, font=(FONT, 9), anchor="w", justify="left",
                  wraplength=wrap).pack(fill="x", pady=(4, 6))
-        self.browse_button = self.button(p, "换个位置…", self.browse, width=9)
+        self.browse_button = self.button(p, "换个位置…", self.browse, width=9, primary=False)
         self.browse_button.pack(anchor="w")
         self.shortcut = tk.BooleanVar(value=True)
-        tk.Checkbutton(p, text="在桌面创建快捷方式", variable=self.shortcut, bg=PANEL, fg=TEXT, selectcolor=BG,
+        tk.Checkbutton(p, text="在桌面创建快捷方式", variable=self.shortcut, bg=PANEL, fg=TEXT, selectcolor="#120b07",
                        activebackground=PANEL, activeforeground=TEXT, font=(FONT, 10), anchor="w").pack(fill="x", pady=(10, 0))
         self.auto_update = tk.BooleanVar(value=load_launcher_settings().get("auto_check_update", True))
         tk.Checkbutton(p, text="启动时自动检查更新（会访问 wow.husen.ca）", variable=self.auto_update, bg=PANEL, fg=TEXT,
-                       selectcolor=BG, activebackground=PANEL, activeforeground=TEXT, font=(FONT, 10),
+                       selectcolor="#120b07", activebackground=PANEL, activeforeground=TEXT, font=(FONT, 10),
                        anchor="w").pack(fill="x")
-        tk.Label(p, text="不需要管理员权限。以后升级直接再装一次，余额和设置不会丢。", bg=PANEL, fg=DIM, font=(FONT, 9),
+        tk.Label(p, text="不需要管理员权限。升级时再装一次就行，余额和设置都会保留。", bg=PANEL, fg=DIM, font=(FONT, 9),
                  anchor="w", justify="left", wraplength=wrap).pack(fill="x", pady=(8, 0))
 
-        tk.Label(p, text="隐私", bg=PANEL, fg=GOLD_DIM, font=(FONT, 10, "bold"), anchor="w").pack(fill="x", pady=(12, 0))
+        tk.Frame(p, bg=EDGE, height=1).pack(fill="x", pady=(14, 0))
+        tk.Label(p, text="隐私", bg=PANEL, fg=GOLD_DIM, font=(FONT, 10, "bold"), anchor="w").pack(fill="x", pady=(10, 0))
         tk.Label(p, text=PRIVACY_TEXT, bg=PANEL, fg=DIM, font=(FONT, 9), anchor="w", justify="left",
                  wraplength=wrap).pack(fill="x", pady=(4, 0))
         link = tk.Label(p, text="完整隐私说明：" + PRIVACY_URL, bg=PANEL, fg=GOLD, font=(FONT, 9, "underline"),
@@ -202,7 +213,7 @@ class Wizard:
         self.status.pack(fill="x", pady=(12, 8))
         row = tk.Frame(body, bg=BG)
         row.pack(fill="x")
-        self.close_button = self.button(row, "取消", root.destroy, width=8)
+        self.close_button = self.button(row, "取消", root.destroy, width=8, primary=False)
         self.close_button.pack(side="right")
         self.main_button = self.button(row, "安装", self.go, width=10)
         self.main_button.pack(side="right", padx=(0, 8))
@@ -211,19 +222,23 @@ class Wizard:
         w, h = root.winfo_reqwidth(), root.winfo_reqheight()
         root.geometry("+%d+%d" % ((root.winfo_screenwidth() - w) // 2, (root.winfo_screenheight() - h) // 3))
 
-    def button(self, parent, text, command, width):
-        frame = tk.Frame(parent, bg=EDGE, padx=1, pady=1)
-        face = tk.Label(frame, text=text, bg=BTN, fg=GOLD, font=(FONT, 10, "bold"), width=width, pady=4, cursor="hand2")
+    def button(self, parent, text, command, width, primary=True):
+        colors = (BTN, BTN_HOVER, WHITE, BTN) if primary else (SEC, SEC_HOVER, TEXT, EDGE)
+        frame = tk.Frame(parent, bg=colors[3], padx=1, pady=1)
+        face = tk.Label(frame, text=text, bg=colors[0], fg=colors[2], font=(FONT, 10, "bold"), width=width, pady=5,
+                        cursor="hand2")
         face.pack()
-        frame.face, frame.enabled, frame.command = face, True, command
-        face.bind("<Enter>", lambda e: frame.enabled and face.configure(bg=BTN_HOVER))
-        face.bind("<Leave>", lambda e: frame.enabled and face.configure(bg=BTN))
+        frame.face, frame.enabled, frame.command, frame.colors = face, True, command, colors
+        face.bind("<Enter>", lambda e: frame.enabled and face.configure(bg=colors[1]))
+        face.bind("<Leave>", lambda e: frame.enabled and face.configure(bg=colors[0]))
         face.bind("<ButtonRelease-1>", lambda e: frame.enabled and frame.command())
         return frame
 
     def enable(self, button, on, text=None):
         button.enabled = on
-        button.face.configure(bg=BTN if on else BTN_OFF, fg=GOLD if on else DIM, cursor="hand2" if on else "arrow")
+        c = button.colors
+        button.face.configure(bg=c[0] if on else BTN_OFF, fg=c[2] if on else OFF_TEXT, cursor="hand2" if on else "arrow")
+        button.configure(bg=c[3] if on else OFF_EDGE)
         if text:
             button.face.configure(text=text)
 
@@ -264,7 +279,7 @@ class Wizard:
             return
         self.installed_exe = exe
         where = "桌面上多了一个「%s」图标，" % APP_NAME if self.shortcut.get() else ""
-        self.status.configure(text="装好了。%s每次玩之前先打开它。" % where, fg=GOOD)
+        self.status.configure(text="安装完成。%s每次玩之前先打开它。" % where, fg=GOOD)
         self.enable(self.main_button, True, "立即打开")
 
 
