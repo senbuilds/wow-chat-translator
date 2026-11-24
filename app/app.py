@@ -275,6 +275,9 @@ class Relay:
         self.balance = None         # 设备账户的余额；口令用户一直是 None
         self.currency = "US$"
         self.no_balance = False     # 余额用完了：先别再去请求，等充值
+        self.trial_left = 0         # 免费试用还剩几条（新电脑领一次，200 条）
+        self.trial_claimed = None   # 领过没有；None = 还没查到
+        self.trial_expires = None
 
     @property
     def own(self):
@@ -288,7 +291,12 @@ class Relay:
     def _note_balance(self, data):
         if isinstance(data, dict) and data.get("balance") is not None:
             self.balance, self.currency = data["balance"], data.get("currency", self.currency)
-            self.no_balance = self.balance <= 0
+            if "trial_left" in data:
+                self.trial_left = int(data.get("trial_left") or 0)
+            if "trial_claimed" in data:
+                self.trial_claimed = bool(data["trial_claimed"])
+                self.trial_expires = data.get("trial_expires")
+            self.no_balance = self.balance <= 0 and self.trial_left <= 0
 
     def account(self):
         """返回 (账户信息, 错误说明)。"""
@@ -357,6 +365,20 @@ class Relay:
         except Exception:
             return None, "连不上翻译服务"
 
+    def start_trial(self):
+        """领免费试用第一步：带上机器码，拿到一次性领取链接。返回 (链接, 错误说明)。"""
+        import fingerprint
+        fp, vm = fingerprint.collect()
+        try:
+            return self._request("/trial/start", {"fp": fp, "vm": vm})["url"], None
+        except urllib.error.HTTPError as e:
+            try:
+                return None, json.loads(e.read().decode("utf-8")).get("error") or "领取失败 %d" % e.code
+            except Exception:
+                return None, "领取失败 %d" % e.code
+        except Exception:
+            return None, "连不上翻译服务"
+
     def translate(self, text, direction):
         """返回 (译文, 错误说明)。"""
         if self.own:
@@ -369,7 +391,7 @@ class Relay:
             return data["text"], None
         except urllib.error.HTTPError as e:
             if e.code == 402:
-                self.balance, self.no_balance = 0, True
+                self.balance, self.trial_left, self.no_balance = 0, 0, True
                 return None, NO_BALANCE
             reason = {401: "口令不对", 429: "请求太频繁", 502: "翻译模型没开"}.get(e.code, "服务出错 %d" % e.code)
             return None, reason
@@ -802,7 +824,8 @@ class Overlay:
         if self.no_balance_told:
             return
         self.no_balance_told = True
-        self._append([("额度用完了，现在只显示原文。请在电脑桌面的「魔兽聊天翻译」启动器里处理。", "warn")])
+        self._append([("额度用完了，现在只显示原文。请在电脑桌面的「魔兽聊天翻译」启动器里处理"
+                       "（新电脑可以在那里领免费 200 条）。", "warn")])
 
     def _open_account(self):
         if self.account_win is not None and self.account_win.winfo_exists():
@@ -962,7 +985,12 @@ class Overlay:
             v.insert("end", ("查不到：%s\n" % self.usage_error) if self.usage_error else "查询中…\n",
                      "bad" if self.usage_error else "big")
         else:
-            v.insert("end", lines(r.balance) + "\n", ("big", "bad" if r.balance <= 0 else "good"))
+            paid = int(max(r.balance, 0) / per)
+            total = paid + r.trial_left
+            text = "约 {:,} 条".format(total) if total >= 10 else ("%d 条" % total)
+            v.insert("end", text + "\n", ("big", "bad" if total <= 0 else "good"))
+            if r.trial_left > 0:
+                v.insert("end", "其中免费试用 %d 条\n" % r.trial_left, "dim")
         v.insert("end", "已翻\n", "dim")
         if spend and not r.own:
             v.insert("end", "今日 %s\n" % lines(spend["today"]))

@@ -318,6 +318,13 @@ class Launcher:
         row.pack(fill="x", pady=(8, 0))
         WowButton(row, "自带模型", self.open_own_model, width=9).pack(side="right")
         WowButton(row, "找回余额", self.open_recover, width=9).pack(side="right", padx=(0, 8))
+        # 新电脑：领免费 200 条（服务器说没领过才显示）
+        self.trial_row = tk.Frame(p, bg=PANEL)
+        self.trial_button = WowButton(self.trial_row, "领取免费 200 条", self.claim_trial, width=14)
+        self.trial_button.pack(side="left")
+        tk.Label(self.trial_row, text="每台电脑一次，点一下网页上的验证就到账", bg=PANEL, fg=DIM, font=(FONT, 9),
+                 anchor="w").pack(side="left", padx=(8, 0))
+        self.trial_polls = 0
         self.mode_label = tk.Label(row, text="", bg=PANEL, fg=DIM, font=(FONT, 9), anchor="w", justify="left",
                                    wraplength=int(200 * k))
         self.mode_label.pack(side="left", fill="x", expand=True)
@@ -564,8 +571,44 @@ class Launcher:
             self.balance_label.configure(text="余额 查不到" if self.service_ok is False else "余额 查询中…", fg=DIM)
         else:
             left = int(max(self.relay.balance, 0) * 100) / 100
-            self.balance_label.configure(text="余额 %s%.2f" % (self.relay.currency, left),
-                                         fg=GOOD if self.relay.balance > 0 else BAD)
+            text = "余额 %s%.2f" % (self.relay.currency, left)
+            if self.relay.trial_left > 0:
+                text += " · 免费试用剩 %d 条" % self.relay.trial_left
+            self.balance_label.configure(text=text, fg=GOOD if self.relay.balance > 0 or self.relay.trial_left > 0 else BAD)
+        # 「领取免费 200 条」：线上服务、没领过才显示
+        show = (not self.relay.own and not self.relay.unlimited and self.relay.trial_claimed is False)
+        if show and not self.trial_row.winfo_ismapped():
+            self.trial_row.pack(fill="x", pady=(8, 0), before=self.cdk_msg)
+        elif not show and self.trial_row.winfo_ismapped():
+            self.trial_row.pack_forget()
+
+    def claim_trial(self):
+        self.trial_button.set(enabled=False)
+        self.cdk_msg.configure(text="正在申请免费试用…", fg=DIM)
+        self.background("trial_started", self.relay.start_trial)
+
+    def on_trial_started(self, url, err):
+        self.trial_button.set(enabled=True)
+        if not url:
+            self.cdk_msg.configure(text="领不了：%s" % err, fg=BAD)
+            return
+        import webbrowser
+        webbrowser.open(url)
+        self.cdk_msg.configure(text="已在浏览器打开领取页面：点一下「确认你是真人」就到账（15 分钟内有效）。", fg=GOLD)
+        self.trial_polls = 36                       # 接下来 3 分钟每 5 秒查一次余额，到账了马上显示
+        self.root.after(5000, self.poll_trial)
+
+    def poll_trial(self):
+        if self.trial_polls <= 0:
+            return
+        self.trial_polls -= 1
+        if self.relay.trial_left > 0:
+            self.trial_polls = 0
+            self.cdk_msg.configure(text="免费试用已到账：%d 条，30 天内有效。" % self.relay.trial_left, fg=GOOD)
+            self.restart_overlay()                  # 翻译在跑的话重启一下：它可能记着「额度用完了」
+            return
+        self.background("account", self.relay.account)
+        self.root.after(5000, self.poll_trial)
 
     def redeem(self):
         code = self.cdk.get().strip()
@@ -781,6 +824,8 @@ class Launcher:
                     text, err, msg = item[1], item[2], item[3]
                     if msg.winfo_exists():
                         msg.configure(text=("能用：%s" % text) if text else ("不能用：%s" % err), fg=GOOD if text else BAD)
+                elif item[0] == "trial_started":
+                    self.on_trial_started(item[1], item[2])
                 elif item[0] == "service":
                     self.service_ok = item[1]
                     self.show_balance()

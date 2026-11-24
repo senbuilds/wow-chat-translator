@@ -23,7 +23,7 @@ def run(*args):
     subprocess.run(args, check=True, cwd=ROOT)
 
 
-PRODUCT = "WoW Chat Translator"
+PRODUCT = "ChatBridge Translator"
 VERSION_TEMPLATE = """VSVersionInfo(
   ffi=FixedFileInfo(filevers=%(tuple)s, prodvers=%(tuple)s, mask=0x3f, flags=0x0, OS=0x40004,
                     fileType=0x1, subtype=0x0, date=(0, 0)),
@@ -65,10 +65,10 @@ def main():
     # 1) 程序本体。--noconsole：不弹黑窗口；数据文件：游戏插件和图标
     run(sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--log-level", "WARN",
         "--name", "WoWTranslator", "--noconsole", "--icon", ICON,
-        "--version-file", version_file("WoWTranslator", "WoW Chat Translator"),
+        "--version-file", version_file("WoWTranslator", "ChatBridge Translator"),
         "--paths", os.path.join(ROOT, "app"),
         "--hidden-import", "app", "--hidden-import", "launcher", "--hidden-import", "codec",
-        "--hidden-import", "version",
+        "--hidden-import", "version", "--hidden-import", "fingerprint",
         "--add-data", os.path.join(ROOT, "addon", "ChatBridge") + os.pathsep + os.path.join("addon", "ChatBridge"),
         "--add-data", ICON + os.pathsep + "assets",
         "--distpath", DIST, "--workpath", WORK, "--specpath", WORK,
@@ -86,7 +86,7 @@ def main():
     # 3) 安装包：单文件，里面带着 payload.zip
     run(sys.executable, "-m", "PyInstaller", "--noconfirm", "--log-level", "WARN",
         "--name", "WoWTranslatorSetup", "--onefile", "--noconsole", "--icon", ICON,
-        "--version-file", version_file("WoWTranslatorSetup", "WoW Chat Translator Setup"),
+        "--version-file", version_file("WoWTranslatorSetup", "ChatBridge Translator Setup"),
         "--paths", os.path.join(ROOT, "app"), "--hidden-import", "version",
         "--add-data", payload + os.pathsep + ".", "--add-data", ICON + os.pathsep + ".",
         "--distpath", DIST, "--workpath", WORK, "--specpath", WORK,

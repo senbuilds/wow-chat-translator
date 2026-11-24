@@ -84,7 +84,8 @@ def write_uninstaller(target_dir):
 def register(target_dir, uninstaller):
     import winreg
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, REG_KEY) as k:
-        for name, value in (("DisplayName", APP_NAME), ("DisplayVersion", APP_VERSION), ("Publisher", "husen.ca"),
+        for name, value in (("DisplayName", APP_NAME + " (ChatBridge Translator)"), ("DisplayVersion", APP_VERSION),
+                            ("Publisher", "ChatBridge Translator"),
                             ("InstallLocation", target_dir), ("DisplayIcon", os.path.join(target_dir, EXE)),
                             ("UninstallString", 'cmd /c "%s"' % uninstaller)):
             winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
