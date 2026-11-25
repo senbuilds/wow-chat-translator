@@ -278,6 +278,7 @@ class Relay:
         self.currency = "US$"
         self.no_balance = False     # 余额用完了：先别再去请求，等充值
         self.trial_left = 0         # 免费试用还剩几条（新电脑领一次，200 条）
+        self.lines_left = None      # 余额还能翻几条（服务器算，按这个账户的实际单价）；旧网关没有就是 None
         self.trial_claimed = None   # 领过没有；None = 还没查到
         self.trial_expires = None
         self.promo_bound = None     # 绑定过推广码没有；None = 还没查到
@@ -296,6 +297,8 @@ class Relay:
             self.balance, self.currency = data["balance"], data.get("currency", self.currency)
             if "trial_left" in data:
                 self.trial_left = int(data.get("trial_left") or 0)
+            if "lines_left" in data:
+                self.lines_left = int(data.get("lines_left") or 0)   # 服务器按这个账户的实际单价算好的条数
             if "promo_bound" in data:
                 self.promo_bound = bool(data["promo_bound"])
             if "trial_claimed" in data:
@@ -1019,9 +1022,11 @@ class Overlay:
         spend = (rep or {}).get("spend")
         per = self.per_line or 0.00026
 
-        def lines(amount):
-            n = int(max(amount, 0) / per)
-            return "约 {:,} 条".format(n) if n >= 10 else ("不到 10 条" if amount > 0 else "0 条")
+        counted = (spend or {}).get("lines") or {}             # 新网关：服务器数好的条数
+
+        def lines(amount, key=None):
+            n = counted[key] if key in counted else int(max(amount, 0) / per)
+            return "约 {:,} 条".format(n) if n >= 10 else ("%d 条" % n if key in counted else ("不到 10 条" if amount > 0 else "0 条"))
 
         v.configure(state="normal")
         v.delete("1.0", "end")
@@ -1034,7 +1039,8 @@ class Overlay:
             v.insert("end", ("查不到：%s\n" % self.usage_error) if self.usage_error else "查询中…\n",
                      "bad" if self.usage_error else "big")
         else:
-            paid = int(max(r.balance, 0) / per)
+            # 老余额按老价扣、新充的按新价扣：条数以服务器算的为准，旧网关才自己估
+            paid = r.lines_left if getattr(r, "lines_left", None) is not None else int(max(r.balance, 0) / per)
             total = paid + r.trial_left
             text = "约 {:,} 条".format(total) if total >= 10 else ("%d 条" % total)
             v.insert("end", text + "\n", ("big", "bad" if total <= 0 else "good"))
@@ -1042,10 +1048,10 @@ class Overlay:
                 v.insert("end", "其中免费试用 %d 条\n" % r.trial_left, "dim")
         v.insert("end", "已翻\n", "dim")
         if spend and not r.own:
-            v.insert("end", "今日 %s\n" % lines(spend["today"]))
-            v.insert("end", "累计 %s" % lines(spend["total"]))
+            v.insert("end", "今日 %s\n" % lines(spend["today"], "today"))
+            v.insert("end", "累计 %s" % lines(spend["total"], "total"))
             v.insert("end", "  （%d 天）\n" % spend["days"], "dim")
-            v.insert("end", "平均每日 %s\n" % lines(spend["daily_avg"]))
+            v.insert("end", "平均每日 %s\n" % lines(spend["daily_avg"], "daily_avg"))
         elif r.own:
             v.insert("end", "自带模型不记录用量\n", "dim")
         else:
