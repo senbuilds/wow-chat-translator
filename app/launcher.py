@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import urllib.error
 import urllib.request
 from tkinter import filedialog
@@ -47,6 +48,11 @@ BTN, BTN_HOVER, BTN_DOWN = "#aa2409", "#c22c0c", "#8a1d07"   # 主按钮：红�
 SEC, SEC_HOVER, SEC_DOWN = "#2a1e15", "#3a2a1d", "#22170f"   # 次按钮：深棕底
 BTN_OFF, OFF_TEXT, OFF_EDGE = "#211710", "#6f604f", "#2e241c"
 GOOD, BAD, WARN = "#8fc46a", "#e8664f", "#edaf00"
+CARD, CARD_LINE, LINE_SOFT = "#24170f", "#3d2c20", "#2e2119"     # 卡片底色、卡片描边、分隔线
+UI_SCALES = (100, 125, 150, 175, 200, 225, 250, 300)            # assets/ui 里预先生成的缩放比例
+FLAVOR_NAMES = {"_forever_": "魔兽世界「无限」", "_retail_": "魔兽世界 正式服", "_classic_": "魔兽世界 怀旧服",
+                "_classic_era_": "魔兽世界 经典怀旧服", "_classic_beta_": "怀旧服测试服", "_ptr_": "正式服测试服",
+                "_beta_": "测试服"}
 
 
 def dark_titlebar(win):
@@ -207,40 +213,134 @@ def desktop_dir():
 # 小部件
 # ---------------------------------------------------------------------------
 
-class WowButton(tk.Frame):
-    """平的按钮。primary=True：红底白字（每块里最主要的那个操作）；否则深棕底、细线边。"""
+def _scale_of(widget):
+    return max(1.0, widget.winfo_fpixels("1i") / 96.0)
 
-    def __init__(self, parent, text, command, width=9, primary=False):
+
+def round_rect(cv, x0, y0, x1, y1, r, **kw):
+    """Canvas 上画圆角矩形（平滑多边形）。"""
+    pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1, x1 - r, y1, x0 + r, y1, x0, y1,
+           x0, y1 - r, x0, y0 + r, x0, y0]
+    return cv.create_polygon(pts, smooth=True, splinesteps=16, **kw)
+
+
+class WowButton(tk.Canvas):
+    """圆角平按钮。primary=True：红底白字（每块里最主要的那个操作）；否则深棕底、细线边。
+    width 按字符数算（和以前的 Label 按钮一样），pack(fill="x") 时会跟着撑满。"""
+
+    def __init__(self, parent, text, command, width=9, primary=False, height=34):
+        k = _scale_of(parent)
+        self.font = tkfont.Font(family=FONT, size=10, weight="bold")
         self.colors = (BTN, BTN_HOVER, BTN_DOWN, WHITE, BTN) if primary else (SEC, SEC_HOVER, SEC_DOWN, TEXT, EDGE)
-        super().__init__(parent, bg=self.colors[4], padx=1, pady=1)
-        self.command, self.enabled = command, True
-        self.face = tk.Label(self, text=text, bg=self.colors[0], fg=self.colors[3], font=(FONT, 10, "bold"),
-                             width=width, pady=5, cursor="hand2")
-        self.face.pack()
-        self.face.bind("<Enter>", lambda e: self._paint(self.colors[1]))
-        self.face.bind("<Leave>", lambda e: self._paint(self.colors[0]))
-        self.face.bind("<ButtonPress-1>", lambda e: self._paint(self.colors[2]))
-        self.face.bind("<ButtonRelease-1>", self._click)
+        w = max(self.font.measure("0") * width + int(16 * k), self.font.measure(text) + int(28 * k))
+        super().__init__(parent, width=w, height=int(height * k), bg=parent.cget("bg"), highlightthickness=0, bd=0,
+                         cursor="hand2")
+        self.k, self.text, self.command, self.enabled, self.state = k, text, command, True, 0
+        self.bind("<Configure>", lambda e: self._draw())
+        self.bind("<Enter>", lambda e: self._paint(1))
+        self.bind("<Leave>", lambda e: self._paint(0))
+        self.bind("<ButtonPress-1>", lambda e: self._paint(2))
+        self.bind("<ButtonRelease-1>", self._click)
+        self._draw()
 
-    def _paint(self, color):
+    def _draw(self):
+        self.delete("all")
+        w, h = max(self.winfo_width(), int(self.cget("width"))), int(self.cget("height"))
+        if self.winfo_width() > 1:
+            w = self.winfo_width()
+        fill = self.colors[self.state] if self.enabled else BTN_OFF
+        edge = self.colors[4] if self.enabled else OFF_EDGE
+        round_rect(self, 1, 1, w - 2, h - 2, int(6 * self.k), fill=fill, outline=edge)
+        self.create_text(w // 2, h // 2, text=self.text, font=self.font,
+                         fill=self.colors[3] if self.enabled else OFF_TEXT)
+
+    def _paint(self, state):
         if self.enabled:
-            self.face.configure(bg=color)
+            self.state = state
+            self._draw()
 
     def _click(self, event):
         if self.enabled:
-            self.face.configure(bg=self.colors[1])
-            inside = 0 <= event.x <= self.face.winfo_width() and 0 <= event.y <= self.face.winfo_height()
-            if inside:
+            self._paint(1)
+            if 0 <= event.x <= self.winfo_width() and 0 <= event.y <= self.winfo_height():
                 self.command()
 
     def set(self, text=None, enabled=None):
         if text is not None:
-            self.face.configure(text=text)
+            self.text = text
         if enabled is not None:
             self.enabled = enabled
-            self.face.configure(bg=self.colors[0] if enabled else BTN_OFF, fg=self.colors[3] if enabled else OFF_TEXT,
-                                cursor="hand2" if enabled else "arrow")
-            self.configure(bg=self.colors[4] if enabled else OFF_EDGE)
+            self.configure(cursor="hand2" if enabled else "arrow")
+            self.state = 0
+        self._draw()
+
+
+class Card(tk.Canvas):
+    """圆角卡片。往 card.inner 里放东西；高度跟着内容走，宽度跟着外面。"""
+
+    def __init__(self, parent, fill=CARD, outline=CARD_LINE, radius=10, pad=16):
+        super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0, bd=0, height=10, width=1)
+        k = _scale_of(parent)
+        self.r, self.p, self.fill, self.outline, self.min_h = int(radius * k), int(pad * k), fill, outline, 0
+        self.inner = tk.Frame(self, bg=fill)
+        self.win = self.create_window(self.p, self.p, window=self.inner, anchor="nw")
+        self.bind("<Configure>", self._layout)
+        self.inner.bind("<Configure>", lambda e: self.fit())
+
+    def need(self):
+        return self.inner.winfo_reqheight() + 2 * self.p
+
+    def fit(self):
+        h = max(self.need(), self.min_h)
+        if int(float(self.cget("height"))) != h:
+            self.configure(height=h)
+
+    def _layout(self, e):
+        self.itemconfigure(self.win, width=max(1, e.width - 2 * self.p))
+        self.delete("bg")
+        round_rect(self, 1, 1, e.width - 2, e.height - 2, self.r, fill=self.fill, outline=self.outline, tags="bg")
+        self.tag_lower("bg")
+
+
+class Link(tk.Label):
+    """文字按钮（底部那排）。和 WowButton 一样有 set(text, enabled)。"""
+
+    def __init__(self, parent, text, command, **kw):
+        super().__init__(parent, text=text, bg=parent.cget("bg"), fg=TEXT, font=(FONT, 10), cursor="hand2", **kw)
+        self.command, self.enabled = command, True
+        self.bind("<Enter>", lambda e: self.enabled and self.configure(fg=GOLD))
+        self.bind("<Leave>", lambda e: self.configure(fg=TEXT if self.enabled else OFF_TEXT))
+        self.bind("<ButtonRelease-1>", lambda e: self.enabled and self.command())
+
+    def set(self, text=None, enabled=None):
+        if text is not None:
+            self.configure(text=text)
+        if enabled is not None:
+            self.enabled = enabled
+            self.configure(fg=TEXT if enabled else OFF_TEXT, cursor="hand2" if enabled else "arrow")
+
+
+class Echo:
+    """一句提示同时写到两个地方（主窗口的提示行、兑换小窗口），主窗口那行没字就收起来。"""
+
+    def __init__(self, *labels, on_change=None):
+        self.labels, self.on_change = labels, on_change
+
+    def configure(self, text=None, fg=None, **_):
+        for lb in self.labels:
+            kw = {}
+            if text is not None:
+                kw["text"] = text
+            if fg is not None:
+                kw["fg"] = fg
+            lb.configure(**kw)
+        if self.on_change:
+            self.on_change()
+
+    config = configure
+
+    def cget(self, key):
+        return self.labels[0].cget(key)
 
 
 def panel(parent, title):
@@ -268,7 +368,7 @@ class Launcher:
         self.service_ok = None
 
         root = self.root = tk.Tk()
-        root.title(APP_NAME)
+        root.title("ChatBridge " + APP_NAME)
         dark_titlebar(root)
         root.configure(bg=BG)
         root.resizable(False, False)
@@ -277,103 +377,165 @@ class Launcher:
         except tk.TclError:
             pass
         k = self.k = max(1.0, root.winfo_fpixels("1i") / 96.0)
-        wrap = int(400 * k)
-        body = tk.Frame(root, bg=BG, padx=int(18 * k), pady=int(14 * k))
+        pct = min(UI_SCALES, key=lambda v: abs(v - k * 100))
+        self.hero_img = tk.PhotoImage(file=resource("assets", "ui", "hero_%d.png" % pct))
+        self.logo_img = tk.PhotoImage(file=resource("assets", "ui", "logo_%d.png" % pct))
+        W, HH = self.hero_img.width(), self.hero_img.height()
+        P = int(24 * k)                                       # 左右留白
+        wrap = W - 2 * P
+
+        # --- 顶部横幅：Logo、英文名（主）、中文名（副）、广告语 ---
+        hero = self.hero = tk.Canvas(root, width=W, height=HH + int(40 * k), bg=BG, highlightthickness=0, bd=0)
+        hero.pack(fill="x")
+        hero.create_image(0, 0, image=self.hero_img, anchor="nw")
+        hero.create_image(P, int(22 * k), image=self.logo_img, anchor="nw")
+        tx = P + self.logo_img.width() + int(12 * k)
+        hero.create_text(tx, int(18 * k), text="ChatBridge", fill=WHITE, anchor="nw", font=("Segoe UI", 21, "bold"))
+        hero.create_text(tx, int(52 * k), text="魔兽聊天翻译 · Translator", fill=DIM, anchor="nw", font=(FONT, 10))
+        x, y = P, HH - int(62 * k)
+        for piece, color in (("别只会打 ", TEXT), ("ty", GOLD), (" 和 ", TEXT), ("gg", GOLD), ("。", TEXT)):
+            item = hero.create_text(x, y, text=piece, fill=color, anchor="nw", font=(FONT, 10))
+            x = hero.bbox(item)[2]
+
+        # --- 运行状态条（压在横幅下沿）---
+        play = Card(hero, fill="#1f150e", outline="#4f3a2a", radius=8, pad=10)
+        hero.create_window(P, HH - int(26 * k), window=play, anchor="nw", width=W - 2 * P)
+        row = play.inner
+        self.run_dot = tk.Label(row, text="●", bg=play.fill, fg=DIM, font=(FONT, 11))
+        self.run_dot.pack(side="left", padx=(int(6 * k), 0))
+        self.run_label = tk.Label(row, text="未启动", bg=play.fill, fg=WHITE, font=(FONT, 12, "bold"))
+        self.run_label.pack(side="left", padx=(int(6 * k), 0))
+        self.run_hint = tk.Label(row, text="", bg=play.fill, fg=DIM, font=(FONT, 9))
+        self.run_hint.pack(side="left", padx=(int(10 * k), 0))
+        self.stop_button = WowButton(row, "停止", self.stop, width=6)
+        self.start_button = WowButton(row, "启动", self.start, width=6, primary=True)
+        self.start_button.pack(side="right")
+
+        self.play, self.hero_h = play, HH
+
+        body = tk.Frame(root, bg=BG, padx=P)
         body.pack(fill="both", expand=True)
 
-        head = tk.Frame(body, bg=BG)
-        head.pack(fill="x", pady=(0, 14))
-        tk.Label(head, text=APP_NAME, bg=BG, fg=WHITE, font=(FONT, 18, "bold")).pack(side="left")
-        tk.Label(head, text="ChatBridge Translator", bg=BG, fg=DIM, font=(FONT, 9, "bold")).pack(side="left",
-                                                                                               padx=(10, 0), pady=(8, 0))
+        # --- 两块：余额 / 游戏 ---
+        tiles = tk.Frame(body, bg=BG)
+        tiles.pack(fill="x", pady=(int(12 * k), 0))
+        tiles.grid_columnconfigure(0, weight=115, uniform="tile")
+        tiles.grid_columnconfigure(1, weight=100, uniform="tile")
+        bal = Card(tiles, pad=16)
+        bal.grid(row=0, column=0, sticky="new", padx=(0, int(6 * k)))
+        game = Card(tiles, pad=16)
+        game.grid(row=0, column=1, sticky="new", padx=(int(6 * k), 0))
+        self.tiles = (bal, game)
 
-        # --- 游戏目录和插件 ---
-        p = panel(body, "游戏目录")
-        self.dir_label = tk.Label(p, text="", bg=PANEL, fg=TEXT, font=(FONT, 9), anchor="w", justify="left",
-                                  wraplength=wrap)
-        self.dir_label.pack(fill="x")
-        row = tk.Frame(p, bg=PANEL)
-        row.pack(fill="x", pady=(6, 0))
-        self.flavor = tk.StringVar()
-        self.flavor_menu = tk.OptionMenu(row, self.flavor, "")
-        self.flavor_menu.configure(bg=SEC, fg=TEXT, activebackground=SEC_HOVER, activeforeground=WHITE, relief="flat",
-                                   highlightthickness=1, highlightbackground=EDGE, font=(FONT, 9), width=14)
-        self.flavor_menu["menu"].configure(bg=SEC, fg=TEXT, activebackground=BTN, activeforeground=WHITE, font=(FONT, 9))
-        self.flavor_menu.pack(side="left")
-        WowButton(row, "浏览…", self.browse, width=7).pack(side="right")
-        row = tk.Frame(p, bg=PANEL)
-        row.pack(fill="x", pady=(10, 0))
-        self.addon_label = tk.Label(row, text="", bg=PANEL, fg=TEXT, font=(FONT, 9), anchor="w", justify="left",
-                                    wraplength=int(250 * k))
-        self.addon_label.pack(side="left", fill="x", expand=True)
-        self.addon_button = WowButton(row, "安装插件", self.install_addon, width=9)
-        self.addon_button.pack(side="right")
-
-        # --- 翻译 ---
-        p = panel(body, "翻译")
-        row = tk.Frame(p, bg=PANEL)
-        row.pack(fill="x")
-        self.run_dot = tk.Label(row, text="●", bg=PANEL, fg=DIM, font=(FONT, 12))
-        self.run_dot.pack(side="left")
-        self.run_label = tk.Label(row, text="未启动", bg=PANEL, fg=TEXT, font=(FONT, 11), anchor="w")
-        self.run_label.pack(side="left", padx=(6, 0))
-        self.stop_button = WowButton(row, "停止", self.stop, width=7)
-        self.stop_button.pack(side="right")
-        self.start_button = WowButton(row, "启动", self.start, width=7, primary=True)
-        self.start_button.pack(side="right", padx=(0, 8))
-        self.run_hint = tk.Label(p, text="", bg=PANEL, fg=DIM, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
-        self.run_hint.pack(fill="x", pady=(6, 0))
-
-        # --- 额度 ---
-        p = panel(body, "额度")
-        self.balance_label = tk.Label(p, text="余额 查询中…", bg=PANEL, fg=TEXT, font=(FONT, 16, "bold"), anchor="w")
+        b = bal.inner
+        tk.Label(b, text="余额", bg=CARD, fg=DIM, font=(FONT, 9), anchor="w").pack(fill="x")
+        self.balance_label = tk.Label(b, text="查询中…", bg=CARD, fg=WHITE, font=("Segoe UI", 20, "bold"), anchor="w")
         self.balance_label.pack(fill="x")
-        row = tk.Frame(p, bg=PANEL)
-        row.pack(fill="x", pady=(8, 0))
-        box = tk.Frame(row, bg=EDGE, padx=1, pady=1)
-        box.pack(side="left", fill="x", expand=True)
-        self.cdk = tk.Entry(box, bg=FIELD, fg=TEXT, insertbackground=GOLD, relief="flat", font=("Consolas", 11))
-        self.cdk.pack(fill="x", ipady=5, padx=1)
-        self.cdk.bind("<Return>", lambda e: self.redeem())
-        self.redeem_button = WowButton(row, "兑换", self.redeem, width=7, primary=True)
-        self.redeem_button.pack(side="right", padx=(8, 0))
-        self.cdk_msg = tk.Label(p, text="粘贴兑换码或推广码后点「兑换」。剩余条数在游戏翻译页的「用量」里看。", bg=PANEL, fg=DIM,
-                                font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
-        self.cdk_msg.pack(fill="x", pady=(6, 0))
-        row = tk.Frame(p, bg=PANEL)
-        row.pack(fill="x", pady=(8, 0))
-        WowButton(row, "自带模型", self.open_own_model, width=9).pack(side="right")
-        WowButton(row, "找回余额", self.open_recover, width=9).pack(side="right", padx=(0, 8))
-        # 新电脑：领免费 200 条（服务器说没领过才显示）
-        self.trial_row = tk.Frame(p, bg=PANEL)
-        self.trial_button = WowButton(self.trial_row, "领取免费 200 条", self.claim_trial, width=14, primary=True)
-        self.trial_button.pack(side="left")
-        tk.Label(self.trial_row, text="每台电脑能领一次，网页上验证一下就到账", bg=PANEL, fg=DIM, font=(FONT, 9),
-                 anchor="w").pack(side="left", padx=(8, 0))
+        self.balance_sub = tk.Label(b, text="", bg=CARD, fg=GOLD, font=(FONT, 9), anchor="w", justify="left",
+                                    wraplength=int(170 * k))
+        self.balance_sub.pack(fill="x")
+        self.bal_buttons = tk.Frame(b, bg=CARD)
+        self.bal_buttons.pack(fill="x", side="bottom", pady=(int(12 * k), 0))
+        self.trial_button = WowButton(self.bal_buttons, "领取免费 200 条", self.claim_trial, width=12, primary=True)
+        self.redeem_open = WowButton(self.bal_buttons, "兑换 / 推广码", self.open_redeem, width=12, primary=True)
+        self.redeem_link = tk.Label(self.bal_buttons, text="已有兑换码 / 推广码 ›", bg=CARD, fg=GOLD, font=(FONT, 9),
+                                    cursor="hand2", anchor="w")
+        self.redeem_link.bind("<ButtonRelease-1>", lambda e: self.open_redeem())
+        self.redeem_open.pack(fill="x")
         self.trial_polls = 0
-        self.mode_label = tk.Label(row, text="", bg=PANEL, fg=DIM, font=(FONT, 9), anchor="w", justify="left",
-                                   wraplength=int(200 * k))
-        self.mode_label.pack(side="left", fill="x", expand=True)
 
-        # --- 底部 ---
-        row = tk.Frame(body, bg=BG)
-        row.pack(fill="x", pady=(0, 4))
-        self.update_button = WowButton(row, "检查更新", self.update_action, width=9)
-        self.update_button.pack(side="right")
-        WowButton(row, "反馈问题", self.open_feedback, width=9).pack(side="right", padx=(0, 8))
-        self.update_label = tk.Label(row, text="版本 %s" % APP_VERSION, bg=BG, fg=DIM, font=(FONT, 9), anchor="w",
-                                     justify="left", wraplength=int(300 * k))
-        self.update_label.pack(side="left", fill="x", expand=True)
+        g = game.inner
+        tk.Label(g, text="游戏", bg=CARD, fg=DIM, font=(FONT, 9), anchor="w").pack(fill="x")
+        self.game_name = tk.Label(g, text="", bg=CARD, fg=TEXT, font=(FONT, 10), anchor="w", justify="left",
+                                  wraplength=int(150 * k))
+        self.game_name.pack(fill="x", pady=(int(4 * k), 0))
+        self.game_status = tk.Label(g, text="", bg=CARD, fg=GOOD, font=(FONT, 10), anchor="w", justify="left",
+                                    wraplength=int(150 * k))
+        self.game_status.pack(fill="x")
+        self.game_buttons = tk.Frame(g, bg=CARD)
+        self.game_buttons.pack(fill="x", side="bottom", pady=(int(12 * k), 0))
+        self.addon_action = WowButton(self.game_buttons, "安装插件", self.install_addon, width=10, primary=True)
+        self.game_open = WowButton(self.game_buttons, "游戏设置", self.open_game, width=10)
+        self.game_open.pack(fill="x")
+
+
+        # 提示行：兑换、领取试用、装插件的结果（没字时收起来）
+        self.notice = tk.Label(body, text="", bg=BG, fg=DIM, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
+        self.notice_anchor = tk.Frame(body, bg=BG, height=1)
+        self.notice_anchor.pack(fill="x")
+
+        # --- 底部一排文字按钮 ---
+        tk.Frame(body, bg=LINE_SOFT, height=1).pack(fill="x", pady=(int(14 * k), 0))
+        bar = tk.Frame(body, bg=BG)
+        bar.pack(fill="x", pady=(int(8 * k), int(6 * k)))
+        self.update_button = None
+        items = (("找回余额", self.open_recover), ("自带模型", self.open_own_model), ("反馈问题", self.open_feedback),
+                 ("检查更新", self.update_action))
+        for n, (label, cmd) in enumerate(items):
+            bar.grid_columnconfigure(n * 2, weight=1, uniform="bar")
+            link = Link(bar, label, cmd, pady=int(4 * k))
+            link.grid(row=0, column=n * 2, sticky="ew")
+            if n < len(items) - 1:
+                tk.Frame(bar, bg=LINE_SOFT, width=1, height=int(16 * k)).grid(row=0, column=n * 2 + 1)
+            if label == "检查更新":
+                self.update_button = link
+
+        # --- 页脚：服务状态、版本 / 设备编号 ---
+        foot = tk.Frame(body, bg=BG)
+        foot.pack(fill="x", pady=(0, int(12 * k)))
+        self.footer = tk.Label(foot, text="", bg=BG, fg=DIM, font=(FONT, 8), anchor="w")
+        self.footer.pack(side="left")
+        self.update_label = tk.Label(foot, text="v%s" % APP_VERSION, bg=BG, fg=DIM, font=(FONT, 8), anchor="w",
+                                     justify="left", wraplength=int(200 * k))
+        self.update_label.pack(side="left", padx=(int(6 * k), 0))
         self.pending_update = None
-        self.footer = tk.Label(body, text="", bg=BG, fg=DIM, font=(FONT, 8), anchor="w", justify="left", wraplength=wrap)
-        self.footer.pack(fill="x")
         self.device_label = None
         if not self.cfg.get("token"):
-            self.device_label = tk.Label(body, text="设备编号 %s · 点击复制" % self.cfg.get("device_id", ""),
-                                         bg=BG, fg=DIM, font=(FONT, 8), anchor="w", cursor="hand2", wraplength=wrap,
-                                         justify="left")
-            self.device_label.pack(fill="x")
+            self.device_label = tk.Label(foot, text=self.device_text(), bg=BG, fg=DIM, font=(FONT, 8), cursor="hand2")
+            self.device_label.pack(side="right")
             self.device_label.bind("<Button-1>", self.copy_device)
+
+        # --- 两个小窗口：兑换 / 推广码、游戏设置（先建好藏起来，点了再出来）---
+        self.redeem_win, rb = self.panel_window("兑换 / 推广码")
+        tk.Label(rb, text="粘贴兑换码（WOW- 开头）或推广码，点「兑换」。", bg=BG, fg=DIM, font=(FONT, 9),
+                 anchor="w").pack(fill="x")
+        row = tk.Frame(rb, bg=BG)
+        row.pack(fill="x", pady=(int(10 * k), 0))
+        box = tk.Frame(row, bg=EDGE, padx=1, pady=1)
+        box.pack(side="left", fill="x", expand=True)
+        self.cdk = tk.Entry(box, bg=FIELD, fg=TEXT, insertbackground=GOLD, relief="flat", font=("Consolas", 11), width=26)
+        self.cdk.pack(fill="x", ipady=int(5 * k), padx=1)
+        self.cdk.bind("<Return>", lambda e: self.redeem())
+        self.redeem_button = WowButton(row, "兑换", self.redeem, width=6, primary=True)
+        self.redeem_button.pack(side="right", padx=(int(8 * k), 0))
+        redeem_msg = tk.Label(rb, text="", bg=BG, fg=DIM, font=(FONT, 9), anchor="w", justify="left",
+                              wraplength=int(360 * k))
+        redeem_msg.pack(fill="x", pady=(int(8 * k), 0))
+        self.cdk_msg = Echo(self.notice, redeem_msg, on_change=self.sync_notice)
+
+        self.game_win, gb = self.panel_window("游戏设置")
+        tk.Label(gb, text="游戏目录", bg=BG, fg=DIM, font=(FONT, 9), anchor="w").pack(fill="x")
+        self.dir_label = tk.Label(gb, text="", bg=BG, fg=TEXT, font=(FONT, 9), anchor="w", justify="left",
+                                  wraplength=int(360 * k))
+        self.dir_label.pack(fill="x", pady=(int(2 * k), 0))
+        row = tk.Frame(gb, bg=BG)
+        row.pack(fill="x", pady=(int(8 * k), 0))
+        self.flavor = tk.StringVar()                          # 游戏里的文件夹名（_forever_ 等），程序用这个
+        self.flavor_label = tk.StringVar()                    # 下拉框里给人看的名字
+        self.flavor_menu = tk.OptionMenu(row, self.flavor_label, "")
+        self.flavor_menu.configure(bg=SEC, fg=TEXT, activebackground=SEC_HOVER, activeforeground=WHITE, relief="flat",
+                                   highlightthickness=1, highlightbackground=EDGE, font=(FONT, 9), width=16)
+        self.flavor_menu["menu"].configure(bg=SEC, fg=TEXT, activebackground=BTN, activeforeground=WHITE, font=(FONT, 9))
+        self.flavor_menu.pack(side="left")
+        WowButton(row, "浏览…", self.browse, width=6).pack(side="right")
+        tk.Frame(gb, bg=LINE_SOFT, height=1).pack(fill="x", pady=(int(14 * k), int(10 * k)))
+        row = tk.Frame(gb, bg=BG)
+        row.pack(fill="x")
+        self.addon_label = tk.Label(row, text="", bg=BG, fg=TEXT, font=(FONT, 9), anchor="w", justify="left",
+                                    wraplength=int(250 * k))
+        self.addon_label.pack(side="left", fill="x", expand=True)
+        self.addon_button = WowButton(row, "安装插件", self.install_addon, width=8)
+        self.addon_button.pack(side="right")
 
         game = self.settings.get("game_dir") or find_game_dir()
         self.set_game_dir(game, self.settings.get("flavor"))
@@ -386,8 +548,95 @@ class Launcher:
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(200, self.tick)
         root.after(100, self.pump)
+        self.refit()
         self.refresh_account()
         self.refresh_service()
+
+    # --- 小窗口（兑换 / 游戏设置）：一直存在，关掉只是藏起来 ---
+    def panel_window(self, title):
+        win = tk.Toplevel(self.root)
+        win.withdraw()
+        win.title(title)
+        win.configure(bg=BG)
+        win.resizable(False, False)
+        win.transient(self.root)
+        try:
+            win.iconbitmap(resource("assets", "icon.ico"))
+        except tk.TclError:
+            pass
+        win.protocol("WM_DELETE_WINDOW", win.withdraw)
+        body = tk.Frame(win, bg=BG, padx=int(20 * self.k), pady=int(16 * self.k))
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=title, bg=BG, fg=WHITE, font=(FONT, 13, "bold"), anchor="w").pack(fill="x", pady=(0, int(6 * self.k)))
+        return win, body
+
+    def show_window(self, win):
+        dark_titlebar(win)
+        win.deiconify()
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - win.winfo_reqwidth()) // 2
+        y = self.root.winfo_rooty() + int(120 * self.k)
+        win.geometry("+%d+%d" % (max(0, x), max(0, y)))
+        win.lift()
+        win.focus_set()
+
+    def open_redeem(self):
+        self.show_window(self.redeem_win)
+        self.cdk.focus_set()
+
+    def open_game(self):
+        self.show_window(self.game_win)
+
+    def refit(self):
+        """卡片高度跟着内容走：状态条、两块卡片（等高）、横幅高度。内容变了就调一次。"""
+        if getattr(self, "_refit_pending", False):
+            return
+        self._refit_pending = True
+
+        def run():
+            self._refit_pending = False
+            self.root.update_idletasks()
+            self.play.fit()
+            self.hero.configure(height=self.hero_h - int(26 * self.k) + self.play.need() + int(4 * self.k))
+            bal, game = self.tiles
+            h = max(bal.need(), game.need())
+            for c in (bal, game):
+                c.min_h = h
+                c.fit()
+        self.root.after_idle(run)
+
+    def say(self, text, fg=DIM):
+        self.cdk_msg.configure(text=text, fg=fg)
+
+    def sync_notice(self):
+        self.refit()
+        if self.notice.cget("text") and not self.notice.winfo_ismapped():
+            self.notice.pack(fill="x", pady=(int(10 * self.k), 0), after=self.notice_anchor)
+        elif not self.notice.cget("text") and self.notice.winfo_ismapped():
+            self.notice.pack_forget()
+
+    def device_text(self):
+        d = self.cfg.get("device_id", "")
+        return "设备编号 %s…%s · 复制" % (d[:6], d[-5:]) if len(d) > 12 else "设备编号 %s · 复制" % d
+
+    def sync_game_tile(self, state):
+        """游戏卡片：游戏名、插件状态；插件没装 / 要更新时按钮变成红色的「安装 / 更新插件」。"""
+        flavor = self.flavor.get()
+        if not self.game_dir:
+            self.game_name.configure(text="没找到魔兽世界", fg=WARN)
+            self.game_status.configure(text="点「游戏设置」选目录", fg=DIM)
+        else:
+            self.game_name.configure(text=FLAVOR_NAMES.get(flavor, flavor), fg=TEXT)
+            self.game_status.configure(text=state[0], fg=state[1])
+        need = state[2]
+        self.refit()
+        self.addon_action.pack_forget()
+        self.game_open.pack_forget()
+        if need:
+            self.addon_action.set(need)
+            self.addon_action.pack(fill="x")
+        else:
+            self.game_open.pack(fill="x")
 
     # --- 游戏目录 ---
     def set_game_dir(self, game_dir, flavor=None):
@@ -396,10 +645,11 @@ class Launcher:
         menu = self.flavor_menu["menu"]
         menu.delete(0, "end")
         for name in flavors:
-            menu.add_command(label=name, command=lambda n=name: self.flavor.set(n))
+            menu.add_command(label=FLAVOR_NAMES.get(name, name), command=lambda n=name: self.flavor.set(n))
         if flavor not in flavors:
             flavor = "_forever_" if "_forever_" in flavors else (flavors[0] if flavors else "")
         self.flavor.set(flavor)
+        self.flavor_label.set(FLAVOR_NAMES.get(flavor, flavor) if flavor else "（没有找到）")
         if self.game_dir:
             self.dir_label.configure(text=self.game_dir, fg=TEXT)
         else:
@@ -423,6 +673,7 @@ class Launcher:
         self.dir_label.configure(text="%s\n这个文件夹里没有找到魔兽世界，请选 World of Warcraft 文件夹本身。" % chosen, fg=BAD)
 
     def flavor_changed(self):
+        self.flavor_label.set(FLAVOR_NAMES.get(self.flavor.get(), self.flavor.get()))
         self.settings["flavor"] = self.flavor.get()
         save_settings(self.settings)
         self.refresh_addon()
@@ -433,17 +684,21 @@ class Launcher:
         if not self.game_dir or not self.flavor.get():
             self.addon_label.configure(text="插件：先选游戏目录", fg=DIM)
             self.addon_button.set("安装插件", enabled=False)
+            self.sync_game_tile(("", DIM, None))
             return
         installed = toc_version(os.path.join(addon_dir(self.game_dir, self.flavor.get()), ADDON + ".toc"))
         if installed is None:
             self.addon_label.configure(text="插件：还没安装", fg=WARN)
             self.addon_button.set("安装插件", enabled=True)
+            self.sync_game_tile(("插件还没安装", WARN, "安装插件"))
         elif version_key(installed) < version_key(bundled):
             self.addon_label.configure(text="插件：已装 v%s，可以更新到 v%s" % (installed, bundled), fg=WARN)
             self.addon_button.set("更新插件", enabled=True)
+            self.sync_game_tile(("插件可以更新到 v%s" % bundled, WARN, "更新插件"))
         else:
             self.addon_label.configure(text="插件：已是最新 v%s" % installed, fg=GOOD)
             self.addon_button.set("重新安装", enabled=True)
+            self.sync_game_tile(("✓ 插件 v%s 已就绪" % installed, GOOD, None))
 
     def auto_update_addon(self):
         """程序更新后，游戏里装的插件如果比程序自带的旧，就顺手更新（没装过的不动）。"""
@@ -463,14 +718,18 @@ class Launcher:
             for name in os.listdir(source):
                 shutil.copy2(os.path.join(source, name), os.path.join(target, name))
         except PermissionError:
-            self.addon_label.configure(text="没有权限写入游戏目录。请关掉本程序，右键图标选「以管理员身份运行」再试。", fg=BAD)
+            msg = "没有权限写入游戏目录。请关掉本程序，右键图标选「以管理员身份运行」再试。"
+            self.addon_label.configure(text=msg, fg=BAD)
+            self.say(msg, BAD)
             return
         except OSError as e:
             self.addon_label.configure(text="安装失败：%s" % e, fg=BAD)
+            self.say("插件安装失败：%s" % e, BAD)
             return
         self.refresh_addon()
         tip = "完全退出游戏再重新进入" if first_time else "在游戏聊天框输入 /reload"
         self.addon_label.configure(text=self.addon_label.cget("text") + "\n已装好。游戏开着的话，" + tip + " 才生效。")
+        self.say("插件已装好。游戏开着的话，%s 才生效。" % tip, GOOD)
 
     # --- 启动和停止 ---
     def overlay_command(self):
@@ -502,15 +761,18 @@ class Launcher:
         on = self.running()
         self.run_dot.configure(fg=GOOD if on else DIM)
         self.run_label.configure(text="翻译运行中" if on else "未启动")
-        self.start_button.set(enabled=not on)
-        self.stop_button.set(enabled=on)
+        if on != getattr(self, "_shown_on", None):          # 启动 / 停止只显示一个
+            self._shown_on = on
+            self.refit()
+            (self.start_button if on else self.stop_button).pack_forget()
+            (self.stop_button if on else self.start_button).pack(side="right")
         if on:
-            self.run_hint.configure(text="进游戏后点聊天框上的「翻译」看译文。这个窗口可以最小化，但别关。", fg=DIM)
+            self.run_hint.configure(text="窗口可以最小化，别关")
         elif self.proc is not None:
             self.proc = None
-            self.run_hint.configure(text="翻译已停止（游戏关掉一分钟后会自动停）。下次玩之前再点「启动」。", fg=DIM)
-        elif not self.run_hint.cget("text"):
-            self.run_hint.configure(text="每次玩之前点「启动」，然后进游戏。", fg=DIM)
+            self.run_hint.configure(text="已停止，下次玩之前再点「启动」")
+        elif not self.run_hint.cget("text") or self.run_hint.cget("text") == "窗口可以最小化，别关":
+            self.run_hint.configure(text="每次玩之前点「启动」")
 
     def tick(self):
         self.tick_once()
@@ -609,26 +871,40 @@ class Launcher:
         self.root.destroy()
 
     def show_balance(self):
-        self.mode_label.configure(text="正在用：自带模型（不扣额度）" if self.relay.own else "正在用：线上翻译服务",
-                                  fg=GOOD if self.relay.own else DIM)
         if self.relay.own:
-            self.balance_label.configure(text="自带模型 · 不扣额度", fg=GOOD)
+            self.balance_label.configure(text="自带模型", fg=GOOD)
+            self.balance_sub.configure(text="翻译走你自己的模型，不扣额度", fg=DIM)
         elif self.relay.unlimited:
-            self.balance_label.configure(text="余额 不限额", fg=GOOD)
+            self.balance_label.configure(text="不限额", fg=GOOD)
+            self.balance_sub.configure(text="", fg=DIM)
         elif self.relay.balance is None:
-            self.balance_label.configure(text="余额 查不到" if self.service_ok is False else "余额 查询中…", fg=DIM)
+            self.balance_label.configure(text="查不到" if self.service_ok is False else "查询中…", fg=DIM)
+            self.balance_sub.configure(text="", fg=DIM)
         else:
             left = int(max(self.relay.balance, 0) * 100) / 100
-            text = "余额 %s%.2f" % (self.relay.currency, left)
+            self.balance_label.configure(text="%s%.2f" % (self.relay.currency, left),
+                                         fg=WHITE if self.relay.balance > 0 or self.relay.trial_left > 0 else BAD)
             if self.relay.trial_left > 0:
-                text += " · 免费试用剩 %d 条" % self.relay.trial_left
-            self.balance_label.configure(text=text, fg=WHITE if self.relay.balance > 0 or self.relay.trial_left > 0 else BAD)
-        # 「领取免费 200 条」：线上服务、没领过才显示
+                self.balance_sub.configure(text="+ 免费试用 %d 条" % self.relay.trial_left, fg=GOLD)
+            elif self.relay.balance <= 0 and self.relay.trial_claimed is False:
+                self.balance_label.configure(fg=WHITE)          # 新电脑：还没领试用，别一上来就标红
+                self.balance_sub.configure(text="新电脑先免费领 200 条", fg=GOLD)
+            elif self.relay.balance <= 0:
+                self.balance_sub.configure(text="额度用完了，充值后才能接着翻", fg=BAD)
+            else:
+                self.balance_sub.configure(text="中文消息不扣钱", fg=DIM)
+        # 「领取免费 200 条」：线上服务、没领过才显示；这时兑换变成下面一行小字
         show = (not self.relay.own and not self.relay.unlimited and self.relay.trial_claimed is False)
-        if show and not self.trial_row.winfo_ismapped():
-            self.trial_row.pack(fill="x", pady=(8, 0), before=self.cdk_msg)
-        elif not show and self.trial_row.winfo_ismapped():
-            self.trial_row.pack_forget()
+        self.refit()
+        if show != getattr(self, "_trial_shown", None):
+            self._trial_shown = show
+            for w in (self.trial_button, self.redeem_open, self.redeem_link):
+                w.pack_forget()
+            if show:
+                self.trial_button.pack(fill="x")
+                self.redeem_link.pack(fill="x", pady=(int(6 * self.k), 0))
+            else:
+                self.redeem_open.pack(fill="x")
 
     def claim_trial(self):
         self.trial_button.set(enabled=False)
@@ -877,7 +1153,7 @@ class Launcher:
             app.save_config(self.cfg)
             self.relay.balance, self.relay.no_balance = None, False
             if self.device_label is not None:
-                self.device_label.configure(text="设备编号 %s · 点击复制" % new)
+                self.device_label.configure(text=self.device_text())
             self.refresh_account_now()
             self.restart_overlay()
             self.cdk_msg.configure(text="已换成原来的设备编号。之前这台的编号存在配置里，换错了可以再换回来：%s" % old, fg=GOOD)
@@ -1009,13 +1285,14 @@ class Launcher:
                         self.cdk.delete(0, "end")
                         self.restart_overlay()      # 翻译在跑的话重启一下：它记着「额度用完了」，要重新查
                         self.cdk_msg.configure(text="兑换成功：+%s%.2f" % (result.get("currency", "US$"), result["added"]), fg=GOOD)
+                        self.root.after(1500, self.redeem_win.withdraw)
                     else:
                         self.cdk_msg.configure(text="兑换失败：%s" % err, fg=BAD)
                     self.show_balance()
         except queue.Empty:
             pass
-        service = {None: "翻译服务：连接中…", True: "翻译服务：正常", False: "翻译服务：连不上，请检查网络或稍后再试"}[self.service_ok]
-        self.footer.configure(text=service, fg=BAD if self.service_ok is False else DIM)
+        service = {None: "● 连接中…", True: "● 翻译服务正常", False: "● 翻译服务连不上"}[self.service_ok]
+        self.footer.configure(text=service, fg={None: DIM, True: GOOD, False: BAD}[self.service_ok])
         self.root.after(200, self.pump)
 
     def close(self):

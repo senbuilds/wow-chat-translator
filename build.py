@@ -71,6 +71,7 @@ def main():
         "--hidden-import", "version", "--hidden-import", "fingerprint",
         "--add-data", os.path.join(ROOT, "addon", "ChatBridge") + os.pathsep + os.path.join("addon", "ChatBridge"),
         "--add-data", ICON + os.pathsep + "assets",
+        "--add-data", os.path.join(ROOT, "assets", "ui") + os.pathsep + os.path.join("assets", "ui"),
         "--distpath", DIST, "--workpath", WORK, "--specpath", WORK,
         os.path.join(ROOT, "app", "main.py"))
 
