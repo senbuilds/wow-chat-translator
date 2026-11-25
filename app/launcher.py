@@ -545,6 +545,7 @@ class Launcher:
         if self.settings.get("auto_check_update", True):   # 安装时可以关掉；关了就只在点「检查更新」时联网
             root.after(1500, lambda: self.check_update(manual=False))
         self.flavor.trace_add("write", lambda *a: self.flavor_changed())
+        self.started = True
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.after(200, self.tick)
         root.after(100, self.pump)
@@ -677,6 +678,15 @@ class Launcher:
         self.settings["flavor"] = self.flavor.get()
         save_settings(self.settings)
         self.refresh_addon()
+        if getattr(self, "started", False):   # 用户自己选了目录或换了版本：这个版本还没装插件就直接装上
+            self.install_if_missing()
+
+    def install_if_missing(self):
+        if not self.game_dir or not self.flavor.get():
+            return
+        if toc_version(os.path.join(addon_dir(self.game_dir, self.flavor.get()), ADDON + ".toc")) is None \
+                and toc_version(resource("addon", ADDON, ADDON + ".toc")):
+            self.install_addon()
 
     # --- 插件 ---
     def refresh_addon(self):
@@ -739,7 +749,8 @@ class Launcher:
             save_settings(self.settings)
         tip = "完全退出游戏再重新进入" if first_time else "在游戏聊天框输入 /reload"
         self.addon_label.configure(text=self.addon_label.cget("text") + "\n已装好。游戏开着的话，" + tip + " 才生效。")
-        self.say("插件已装好。游戏开着的话，%s 才生效。" % tip, GOOD)
+        name = FLAVOR_NAMES.get(self.flavor.get(), self.flavor.get())
+        self.say("插件已装进%s。游戏开着的话，%s 才生效。" % (name, tip), GOOD)
 
     # --- 启动和停止 ---
     def overlay_command(self):
