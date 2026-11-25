@@ -701,12 +701,19 @@ class Launcher:
             self.sync_game_tile(("✓ 插件 v%s 已就绪" % installed, GOOD, None))
 
     def auto_update_addon(self):
-        """程序更新后，游戏里装的插件如果比程序自带的旧，就顺手更新（没装过的不动）。"""
+        """打开启动器时自动处理插件：
+        - 找到游戏、插件还没装、以前也没自动装过：自动装好（只做一次，用户后来自己删了插件就不再硬塞）；
+        - 已经装了但比程序自带的旧：顺手更新。"""
         if not self.game_dir or not self.flavor.get():
             return
         installed = toc_version(os.path.join(addon_dir(self.game_dir, self.flavor.get()), ADDON + ".toc"))
         bundled = toc_version(resource("addon", ADDON, ADDON + ".toc"))
-        if installed and bundled and version_key(installed) < version_key(bundled):
+        if installed is None and bundled and not self.settings.get("addon_auto_installed"):
+            self.install_addon()
+            if toc_version(os.path.join(addon_dir(self.game_dir, self.flavor.get()), ADDON + ".toc")):
+                self.settings["addon_auto_installed"] = True
+                save_settings(self.settings)
+        elif installed and bundled and version_key(installed) < version_key(bundled):
             self.install_addon()
 
     def install_addon(self):
@@ -727,6 +734,9 @@ class Launcher:
             self.say("插件安装失败：%s" % e, BAD)
             return
         self.refresh_addon()
+        if first_time:
+            self.settings["addon_auto_installed"] = True     # 装过一次（手动或自动），以后就不再自动装
+            save_settings(self.settings)
         tip = "完全退出游戏再重新进入" if first_time else "在游戏聊天框输入 /reload"
         self.addon_label.configure(text=self.addon_label.cget("text") + "\n已装好。游戏开着的话，" + tip + " 才生效。")
         self.say("插件已装好。游戏开着的话，%s 才生效。" % tip, GOOD)
