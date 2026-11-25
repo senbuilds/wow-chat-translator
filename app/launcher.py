@@ -33,6 +33,7 @@ ADDON = "ChatBridge"
 FONT = "Microsoft YaHei UI"
 
 DEVICE_RE = re.compile(r"^d_[0-9a-f]{32}$")
+PROMO_RE = re.compile(r"^(?!WOW-)[A-Z]{2,8}-[A-Z2-9]{5}$")    # 推广码，例如 ZAC-7KQ2M（兑换码都是 WOW- 开头）
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$")
 FEEDBACK_KINDS = [("no_translate", "装好了但不翻译 / 看不到译文"), ("connect", "连不上游戏或翻译服务"),
                   ("billing", "充值、兑换码、余额"), ("wrong_translation", "翻译不对 / 黑话翻错"),
@@ -336,7 +337,7 @@ class Launcher:
         self.cdk.bind("<Return>", lambda e: self.redeem())
         self.redeem_button = WowButton(row, "兑换", self.redeem, width=7, primary=True)
         self.redeem_button.pack(side="right", padx=(8, 0))
-        self.cdk_msg = tk.Label(p, text="粘贴兑换码后点「兑换」。剩余条数在游戏翻译页的「用量」里看。", bg=PANEL, fg=DIM,
+        self.cdk_msg = tk.Label(p, text="粘贴兑换码或推广码后点「兑换」。剩余条数在游戏翻译页的「用量」里看。", bg=PANEL, fg=DIM,
                                 font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
         self.cdk_msg.pack(fill="x", pady=(6, 0))
         row = tk.Frame(p, bg=PANEL)
@@ -664,9 +665,38 @@ class Launcher:
         if self.cfg.get("token"):
             self.cdk_msg.configure(text="你用的是不限额口令，不需要兑换。", fg=DIM)
             return
+        if PROMO_RE.match(code.upper()):
+            self.redeem_button.set(enabled=False)
+            self.cdk_msg.configure(text="正在核对推广码…", fg=DIM)
+            self.background("promo_started", lambda: self.relay.start_promo(code.upper()))
+            return
         self.cdk_msg.configure(text="兑换中…", fg=DIM)
         self.redeem_button.set(enabled=False)
         self.background("redeemed", lambda: self.relay.redeem(code))
+
+    def on_promo_started(self, url, err):
+        self.redeem_button.set(enabled=True)
+        if not url:
+            self.cdk_msg.configure(text="推广码用不了：%s" % err, fg=BAD)
+            return
+        import webbrowser
+        webbrowser.open(url)
+        self.cdk.delete(0, "end")
+        self.cdk_msg.configure(text="已在浏览器打开验证页面，验证一下就到账（15 分钟内有效）。", fg=GOLD)
+        self.promo_polls = 36                       # 接下来 3 分钟每 5 秒查一次，到账了马上显示
+        self.root.after(5000, self.poll_promo)
+
+    def poll_promo(self):
+        if getattr(self, "promo_polls", 0) <= 0:
+            return
+        self.promo_polls -= 1
+        if self.relay.promo_bound:
+            self.promo_polls = 0
+            self.cdk_msg.configure(text="推广码已生效，送你的额度已到账。", fg=GOOD)
+            self.restart_overlay()
+            return
+        self.background("account", self.relay.account)
+        self.root.after(5000, self.poll_promo)
 
     # --- 对话框：找回余额、自带模型 ---
     # --- 反馈 ---
@@ -963,6 +993,8 @@ class Launcher:
                     text, err, msg = item[1], item[2], item[3]
                     if msg.winfo_exists():
                         msg.configure(text=("能用：%s" % text) if text else ("不能用：%s" % err), fg=GOOD if text else BAD)
+                elif item[0] == "promo_started":
+                    self.on_promo_started(item[1], item[2])
                 elif item[0] == "feedback_sent":
                     self.on_feedback_sent(*item[1:])
                 elif item[0] == "trial_started":

@@ -280,6 +280,7 @@ class Relay:
         self.trial_left = 0         # 免费试用还剩几条（新电脑领一次，200 条）
         self.trial_claimed = None   # 领过没有；None = 还没查到
         self.trial_expires = None
+        self.promo_bound = None     # 绑定过推广码没有；None = 还没查到
 
     @property
     def own(self):
@@ -295,6 +296,8 @@ class Relay:
             self.balance, self.currency = data["balance"], data.get("currency", self.currency)
             if "trial_left" in data:
                 self.trial_left = int(data.get("trial_left") or 0)
+            if "promo_bound" in data:
+                self.promo_bound = bool(data["promo_bound"])
             if "trial_claimed" in data:
                 self.trial_claimed = bool(data["trial_claimed"])
                 self.trial_expires = data.get("trial_expires")
@@ -377,6 +380,20 @@ class Relay:
             return self._request("/usage"), None
         except urllib.error.HTTPError as e:
             return None, {401: "口令不对", 404: "翻译服务版本太旧，还没有用量功能"}.get(e.code, "服务出错 %d" % e.code)
+        except Exception:
+            return None, "连不上翻译服务"
+
+    def start_promo(self, code):
+        """填推广码第一步：带上机器码，拿到一次性验证链接。返回 (链接, 错误说明)。"""
+        import fingerprint
+        fp, vm = fingerprint.collect()
+        try:
+            return self._request("/promo/start", {"code": code, "fp": fp, "vm": vm})["url"], None
+        except urllib.error.HTTPError as e:
+            try:
+                return None, json.loads(e.read().decode("utf-8")).get("error") or "推广码用不了 %d" % e.code
+            except Exception:
+                return None, "推广码用不了 %d" % e.code
         except Exception:
             return None, "连不上翻译服务"
 
