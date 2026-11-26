@@ -397,6 +397,273 @@ def main():
     assert lua.eval("boxtext()") == b"plain {1} text", "换过一次就不再换"
     lua.eval("typebox")(b"")
 
+    # ------------------------------------------------------------------
+    # 2.10 的修改
+    # ------------------------------------------------------------------
+    def out(before):
+        """before 之后收到的消息；翻译页位置（W）可能随时插进来，和这里要核对的顺序无关，滤掉"""
+        return [p.decode() for _, p in seen[before:] if not p.startswith(b"W\t")]
+
+    # 版本号：插件和 toc 一致
+    with open(os.path.join(ROOT, "addon", "ChatBridge", "ChatBridge.toc"), encoding="utf-8") as f:
+        assert "## Version: 2.10\n" in f.read()
+    assert lua.eval("ChatBridge.VERSION") == b"2.10"
+
+    # 1) 发话时的链接占位符：新引擎的 |cnIQ4: 颜色写法和老的 |cff…… 都认，编号按出现顺序
+    newstyle = "|cnIQ4:|Hitem:19019::::::::70:::::|h[雷霆之怒]|h|r"
+    before = len(seen)
+    typebox(("出 " + newstyle + " 和 " + mine + ";;").encode())
+    pump(0.6)
+    assert out(before) == ["Q\t\t出 {1} 和 {2}"], seen[before:]
+    typebox(b"WTS {1} and {2}")
+    assert boxtext().decode() == "WTS " + newstyle + " and " + mine, boxtext()
+    assert lua.eval("ChatBridge.outLinks") is None, "都换回去了，表应该清空"
+    # 没跟着链接的 |cn…: 颜色前缀也要剥掉，不能带着转义送去翻
+    before = len(seen)
+    typebox("|cnIQ2:绿字|r 你好;;".encode())
+    pump(0.6)
+    assert out(before) == ["Q\t\t绿字 你好"], seen[before:]
+
+    # 8) 连着两次 Ctrl+T：第二句不带链接，不能清掉第一句还没用掉的链接
+    before = len(seen)
+    typebox(("出 " + mine + ";;").encode())
+    typebox("谢谢;;".encode())
+    pump(1.0)
+    assert out(before) == ["Q\t\t出 {1}", "Q\t\t谢谢"], seen[before:]
+    typebox(b"WTS {1}")
+    assert boxtext().decode() == "WTS " + mine, boxtext()
+    # 两句都带链接：编号接着排（{1}、{2}），哪句译文先贴回来都各自换对；全换完后编号回到 {1}
+    before = len(seen)
+    typebox(("出 " + mine + ";;").encode())
+    typebox(("收 " + newstyle + ";;").encode())
+    pump(1.0)
+    assert out(before) == ["Q\t\t出 {1}", "Q\t\t收 {2}"], seen[before:]
+    typebox(b"WTB {2}")                                   # 第二句的译文先回来
+    assert boxtext().decode() == "WTB " + newstyle, boxtext()
+    typebox(b"WTS {1} {1}")                               # 同一个占位符出现两次也都换
+    assert boxtext().decode() == "WTS " + mine + " " + mine, boxtext()
+    before = len(seen)
+    typebox(("再出 " + mine + ";;").encode())
+    pump(0.6)
+    assert out(before) == ["Q\t\t再出 {1}"], seen[before:]
+    lua.execute(b"now = now + 61")                        # 60 秒没用：作废，不再替换
+    typebox(b"late {1}")
+    assert boxtext() == b"late {1}" and lua.eval("ChatBridge.outLinks") is None
+    typebox(b"")
+
+    # 2) 队列优先级：控制类排在所有没发出的聊天前面（控制类之间先后不变）；满了只丢最老的聊天
+    enq, scroll = lua.eval("ChatBridge.Enqueue"), lua.eval("ChatBridge.EnqueueScroll")
+    pump(0.6)
+    before = len(seen)
+    for i in range(35):                                   # 上限 30：m0~m4 被挤掉
+        enq(("P\tMate\tm%d" % i).encode())
+    enq("Q\t\t我要发的话".encode())                        # 控制类各挤掉一条最老的聊天（m5、m6、m7）
+    enq(b"A\t\t")
+    scroll(1)
+    scroll(2)                                             # 队尾是聊天也要能和上一条滚动合并
+    pump(9.0)
+    assert out(before) == ["Q\t\t我要发的话", "A\t\t", "V\t3\t"] + ["P\tMate\tm%d" % i for i in range(8, 35)], out(before)
+    # 排着的全是控制类：一条都不丢（哪怕超过上限），这时新来的聊天让路
+    before = len(seen)
+    for i in range(32):
+        enq(("Q\t\tn%d" % i).encode())
+    enq(b"P\tMate\tno room")
+    pump(9.0)
+    assert out(before) == ["Q\t\tn%d" % i for i in range(32)], out(before)
+    # 真实路径：聊天刷屏后按 Ctrl+T，这句话下一个就发
+    before = len(seen)
+    for i in range(6):
+        fire(b"CHAT_MSG_PARTY", ("spam %d" % i).encode(), b"Mate")
+    typebox("等我一下;;".encode())
+    pump(2.5)
+    assert out(before) == ["Q\t\t等我一下"] + ["P\tMate\tspam %d" % i for i in range(6)], out(before)
+
+    # 3) 带随机后缀的物品：先拿整串链接查（带后缀的本地名），查不到再退回按编号查
+    lua.execute("""
+        fullnames, infomode, namecalls, infocalls = {}, "ok", 0, 0
+        local byId = C_Item.GetItemNameByID
+        C_Item.GetItemNameByID = function(id) namecalls = namecalls + 1; return byId(id) end
+        function GetItemInfo(arg)
+            infocalls = infocalls + 1
+            if infomode == "error" then error("boom") end
+            if infomode == "secret" then return "SECRETNAME" end
+            if type(arg) == "string" then return fullnames[arg] end
+        end
+        secrets["SECRETNAME"] = true
+        names[7460] = "勇士护腿"
+        fullnames["item:7460:0:0:0:0:0:584:0"] = "灵猴之勇士护腿"
+    """.encode())
+    suffixed = "|cff1eff00|Hitem:7460:0:0:0:0:0:584:0|h[Champion's Leggings of the Monkey]|h|r"
+    for mode, expect in (("ok", "灵猴之勇士护腿"), ("secret", "勇士护腿"), ("error", "勇士护腿")):
+        lua.execute(('infomode = "%s"' % mode).encode())
+        before = len(seen)
+        fire(b"CHAT_MSG_PARTY", ("WTS " + suffixed).encode(), b"Mate")
+        pump(0.6)
+        assert out(before) == ["P\tMate\tWTS [%s]" % expect], (mode, out(before))
+    lua.execute(b'infomode = "ok"')
+
+    # 4) 一条消息只查一遍名字（以前 onChat 查一遍、Clean 又查一遍）
+    lua.execute(b"namecalls, infocalls = 0, 0")
+    before = len(seen)
+    fire(b"CHAT_MSG_PARTY", ("WTS " + link % (12784, "Arcanite Reaper")).encode(), b"Mate")
+    pump(0.6)
+    assert out(before) == ["P\tMate\tWTS [奥金斧]"], out(before)
+    assert (lua.eval("infocalls"), lua.eval("namecalls")) == (1, 1), (lua.eval("infocalls"), lua.eval("namecalls"))
+    assert lua.eval("ChatBridge.Clean")(("x " + suffixed).encode()).decode() == "x [灵猴之勇士护腿]"   # Clean 仍是「查名字 + 剥转义」
+
+    # 5) 战网密语：发言人是受保护名字串，用第 13 个参数 bnSenderID 认人
+    def bn(text, bn_id, sender=b"|Kp12|k"):
+        fire(b"CHAT_MSG_BN_WHISPER", text, sender, b"", b"", b"", b"", 0, 0, b"", 0, 1, b"", bn_id)
+    before = len(seen)
+    bn(b"hey", 12)                                        # 没有 C_BattleNet：用能区分人的占位名
+    bn(b"yo", 13)
+    pump(1.0)
+    assert out(before) == ["B\t战网好友12\they", "B\t战网好友13\tyo"], out(before)
+    lua.execute("""
+        bninfo = {
+            [21] = { battleTag = "Bob#1234", accountName = "|Kq21|k" },
+            [22] = { accountName = "Alice Real" },
+            [23] = { accountName = "|Kq23|k" },                       -- 名字也是受保护串：剥完是空的
+            [24] = { battleTag = "SECRETNAME", accountName = "SECRETNAME" },
+        }
+        C_BattleNet = { GetAccountInfoByID = function(id)
+            if id == 25 then error("boom") end
+            return bninfo[id]
+        end }
+    """.encode())
+    before = len(seen)
+    for i in range(21, 27):
+        bn(b"m", i)
+    pump(2.0)
+    assert out(before) == ["B\t%s\tm" % n for n in ("Bob", "Alice Real", "战网好友23", "战网好友24", "战网好友25", "战网好友26")], out(before)
+    # 编号本身是秘密值 / 没带编号：退回老办法（名字串剥掉后是「?」），不报错
+    lua.execute(b"secrets[99] = true")
+    before = len(seen)
+    bn(b"m", 99)
+    fire(b"CHAT_MSG_BN_WHISPER", b"n", b"|Kp12|k")
+    pump(1.0)
+    assert out(before) == ["B\t?\tm", "B\t?\tn"], out(before)
+    # 重试路径（物品没缓存，0.4 秒后再走一遍）也带着编号
+    before = len(seen)
+    bn(("look " + link % (4242, "Uncached Thing")).encode(), 21)
+    lua.eval("runtimers")()
+    pump(0.6)
+    assert out(before) == ["B\tBob\tlook [Uncached Thing]"], out(before)
+    # 秘密内容照旧只发「读不到」
+    lua.execute(b"now = now + 20")
+    before = len(seen)
+    bn(b"SECRETTEXT", 21)
+    pump(0.6)
+    assert out(before) == ["!\tB\t"], out(before)
+
+    # 6) 自己说的话：有 GUID 就比 GUID——跨服同名的别人照翻，自己的话不翻；没 GUID 才比名字
+    lua.execute(b'function UnitGUID(unit) if unit == "player" then return "Player-1-ME" end end')
+
+    def say(text, sender, guid=None):
+        args = (b"", b"", b"", b"", 0, 0, b"", 0, 1, guid) if guid else ()
+        fire(b"CHAT_MSG_SAY", text, sender, *args)
+    before = len(seen)
+    say(b"same name other realm", b"Senhu-Stormrage", b"Player-2-OTHER")
+    say(b"mine by guid", b"Senhu-Ethereum", b"Player-1-ME")
+    say(b"mine by name", b"Senhu-Ethereum")
+    say(b"hello", b"Other", b"Player-3-X")
+    pump(1.0)
+    assert out(before) == ["S\tSenhu\tsame name other realm", "S\tOther\thello"], out(before)
+    lua.execute(b'secrets["Player-1-ME"] = true')         # 自己的 GUID 读出来是秘密值：不拿它比，退回比名字
+    before = len(seen)
+    say(b"x", b"Senhu-Ethereum", b"Player-2-OTHER")
+    say(b"y", b"Other", b"Player-3-X")
+    pump(1.0)
+    assert out(before) == ["S\tOther\ty"], out(before)
+    lua.execute(b'secrets["Player-1-ME"] = nil')
+
+    # 7) 临时聊天窗口（ChatFrame11 起）也要挂上 Ctrl+T：游戏开临时窗口后再挂一遍
+    lua.execute(b"""
+        hookcalls, openhooks = 0, {}
+        function FCF_OpenTemporaryWindow() end
+        function hooksecurefunc(name, fn)
+            hookcalls = hookcalls + 1
+            assert(name == "FCF_OpenTemporaryWindow")
+            local orig = _G[name]
+            _G[name] = function(...) orig(...); fn(...) end
+        end
+        function mkbox(name)
+            local b = CreateFrame("EditBox", name)
+            b.hooks, b.text, b.chatBridgeHooked = {}, "", false
+            b.HookScript = function(self, n, fn) assert(self.hooks[n] == nil, "hooked twice"); self.hooks[n] = fn end
+            b.GetText = function(self) return self.text end
+            b.SetText = function(self, t) self.text = t end
+            _G[name] = b
+            return b
+        end
+    """)
+    fire(b"PLAYER_ENTERING_WORLD")
+    fire(b"PLAYER_ENTERING_WORLD")                        # 每次过图都会触发：钩子只能装一次
+    assert lua.eval("hookcalls") == 1, lua.eval("hookcalls")
+    pump(6.0)
+    lua.execute(b'CHAT_FRAMES = { "ChatFrame1", "ChatFrame11" }; mkbox("ChatFrame11EditBox"); FCF_OpenTemporaryWindow()')
+    assert lua.eval("ChatFrame11EditBox.hooks.OnKeyDown ~= nil and ChatFrame11EditBox.hooks.OnTextChanged ~= nil")
+    lua.execute(b"FCF_OpenTemporaryWindow()")             # 再开一个：已挂过的不重复挂（重复会触发上面的 assert）
+    before = len(seen)
+    lua.execute("ChatFrame11EditBox.text = '密语窗口里的话'; ctrl = true; "
+                "ChatFrame11EditBox.hooks.OnKeyDown(ChatFrame11EditBox, 'T'); ctrl = false".encode())
+    pump(0.6)
+    assert out(before) == ["Q\t\t密语窗口里的话"] and lua.eval("ChatFrame11EditBox.text") == b"", out(before)
+
+    # 9) 遮挡检测碰到秘密数值 / 报错的框体：当它不存在，位置上报不能停
+    def last_w():
+        return [p for _, p in seen if p.startswith(b"W\t")][-1]
+    pump(1.0)
+    shown = b"W\t1,124,743,450,207,207,18\t"
+    assert last_w() == shown, last_w()
+    # 位置上明明盖住了翻译页，但 GetRect 返回的是秘密数值：不能拿来算，当没这个框体
+    lua.execute(b"""
+        for _, v in ipairs({ 200.5, 100.5, 300.5 }) do secrets[v] = true end
+        MailFrame = CreateFrame('Frame', 'MailFrame')
+        MailFrame.GetRect = function() return 200.5, 100.5, 300.5, 300.5 end
+    """)
+    pump(1.0)
+    assert last_w() == shown, "秘密数值的框体不该参与遮挡判断"
+    lua.execute(b"MailFrame.GetRect = function() return 200, 100, 300, 300 end")   # 同一位置、普通数值：确实算盖住
+    pump(1.0)
+    assert last_w() == b"W\t0\t", last_w()
+    lua.execute(b"MailFrame.GetRect = function() error('secret arithmetic') end")   # 这个框体一查就报错
+    pump(1.0)                                             # 以前错误会从 OnUpdate 里冒出来（这里 tick 直接抛异常）
+    assert last_w() == shown, last_w()
+    lua.execute(b"TradeSkillFrame:Show()")                # 一个框体报错不连累别的框体的判断
+    pump(1.0)
+    assert last_w() == b"W\t0\t", last_w()
+    lua.execute(b"TradeSkillFrame:Hide(); MailFrame:Hide()")
+    pump(1.0)
+    assert last_w() == shown, last_w()
+    # 算位置本身出错：OnUpdate 不报错，恢复后照常上报
+    lua.execute(b"realPageRect = ChatBridge.PageRect; ChatBridge.PageRect = function() error('boom') end")
+    lua.eval("ChatBridge.Announce")()
+    before = len(seen)
+    pump(5.0)
+    assert out(before) == ["@\t2.10\tSenhu"] * 2, out(before)      # 位置发不了，「我在线」照发
+    lua.execute(b"ChatBridge.PageRect = realPageRect; "
+                b"for _, f in ipairs(frames) do if f.name == 'ChatBridgePanel' then f.l = 210 end end")
+    pump(1.0)
+    assert last_w() == b"W\t1,236,743,450,207,207,18\t", last_w()
+
+    # 10) 官网「上次买的兑换码」：只有请求成功且服务器说已兑换才记成已用，临时错误照常显示
+    with open(os.path.join(ROOT, "site", "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    assert "!j.code" not in page, "不带 code 的响应（502、429）不能当成已兑换"
+    assert "return r.ok ? r.json() : null;" in page and "if (j && j.used) {" in page
+
+    # 11) 繁体页的人机验证组件用繁体
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    import build_hant
+    import i18n
+    mode, i18n._mode = i18n._mode, "hant"
+    try:
+        hant = build_hant.to_hant_page("<script>turnstile.render('#captcha', {sitekey: K, language: 'zh-cn',});</script>", "trial.html")
+    finally:
+        i18n._mode = mode
+    assert "language: 'zh-tw'" in hant and "zh-cn" not in hant, hant
+
     print("addon tests passed:", len(seen), "frames decoded")
 
 

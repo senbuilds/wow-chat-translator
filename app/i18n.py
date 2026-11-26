@@ -1,5 +1,11 @@
-"""简体 / 繁体。界面文字在代码里一律写简体；繁体模式下在 Tk 这一层统一转成繁体（台湾常用字形 + 常用词），
-翻译页里的译文也一起转。玩家打的繁体中文发出去之前先转回简体，服务器的黑话表只认简体。
+"""简体 / 繁体。界面文字在代码里一律写简体；繁体模式下在 Tk 这一层统一转成繁体（台湾常用字形 + 常用词）。
+玩家打的繁体中文发出去之前先转回简体，服务器的黑话表只认简体。
+
+台湾用词表只用在程序自己写的界面文字上。翻译页里的聊天内容不能过词表：词表不是幂等的，服务器已经按台服
+叫法翻好的「地精」（台服指 gnome）会被再换成「哥布林」，队友原话「我没法力了」会变成「我沒辦法力了」。所以：
+  - 译文、发言人名字、方括号里的物品名：原样。app.py 往翻译页插这些片段时带上 RAW_TAG 标签，钩子看到就不动它。
+  - 队友的中文原话：只转字形，用 glyph()，不换词；转完同样带 RAW_TAG 插入。
+  - 没带 RAW_TAG 的片段都当成程序自己的提示，照旧走 t()。
 
 模式：config.json 的 "lang"："auto"（默认，跟系统语言）| "hans" | "hant"。环境变量 WOWTR_LANG 可以强制（测试用）。
 转换：先按 twdict.py 的台湾用词表整词替换（一般用语 + 台服游戏译名），其余的字用 OpenCC 的 s2tw 转字形。
@@ -10,6 +16,8 @@ import os
 import re
 
 _mode = "hans"
+# 翻译页（tk.Text）里带这个标签的片段是聊天内容，Text.insert 的钩子不转换它。只是个记号，不用配样式。
+RAW_TAG = "raw"
 _s2t = _t2s = None
 _CJK = re.compile(r"[一-鿿]")
 
@@ -76,20 +84,35 @@ def _phrases():
     if _phrase_re is None:
         for a, b in twdict.GENERAL + twdict.GAME:
             _phrase_map[a] = b
+        # 台服译名里本来就带「里」的（提里斯法林地）：原文里直接写了这个词时也整词保留，
+        # 免得被下面 _plain 里「里→裡」的规则改成「提裡斯法林地」
+        for b in [v for v in _phrase_map.values() if "里" in v]:
+            _phrase_map.setdefault(b, b)
         keys = sorted(_phrase_map, key=len, reverse=True)           # 长词优先
         _phrase_re = re.compile("|".join(re.escape(k) for k in keys))
     return _phrase_re
 
 
+# 不是量词的「只」（别只会、只显示）：前面不是数词 / 指示词。OpenCC 会把其中一些错转成「隻」（别只会 → 別隻會）。
+_ADVERB_ZHI = re.compile(r"(?<![一二两兩三四五六七八九十几幾这這那每半\d])只")
+# 方位词「里」（副本里、启动器里）OpenCC 不一定转；公里、里程、邻里这些不是方位词，不动
+_LOCATIVE_LI = re.compile(r"(?<![公英千海鄰故萬百])里(?![程長])")
+
+
 def _plain(seg):
-    """没被词表整词替换的部分：量词等规则 + 字形转换。"""
+    """没被词表整词替换的部分：量词等规则 + 字形转换。只处理程序自己写的简体界面文字。"""
     for pat, rep in twdict.REGEX:
         seg = re.sub(pat, rep, seg)
-    return _s2t.convert(seg)
+    # 「只」「里」这两条都只看这一段简体原文，不再对整句结果做回改：以前是在最后的结果上把「隻」改回「只」、
+    # 把「里」改成「裡」，会连原文里本来就对的繁体（有隻怪）和词表换出来的译名（提里斯法林地）一起改坏。
+    # 副词「只」原样留下，两边分别转字形；量词「只」（一只、这只）照常交给 OpenCC 转成「隻」。
+    res = "只".join(_s2t.convert(part) if part else "" for part in _ADVERB_ZHI.split(seg))
+    return _LOCATIVE_LI.sub("裡", res)
 
 
 def to_hant(text):
-    """简体（大陆说法）→ 台湾繁体说法：词表整词替换（一次扫描）+ 其余转字形。"""
+    """简体（大陆说法）→ 台湾繁体说法：词表整词替换（一次扫描）+ 其余转字形。
+    只给程序自己写的文字用（界面、官网、插件对照表）。聊天内容别过这个函数：词表不是幂等的，见文件开头。"""
     if not text or not _CJK.search(text) or not _load():
         return text
     out, pos = [], 0
@@ -99,10 +122,8 @@ def to_hant(text):
         pos = m.end()
     out.append(_plain(text[pos:]))
     res = "".join(out)
-    res = re.sub(r"(?<![一二兩三四五六七八九十幾這那每半\d])隻", "只", res)      # OpenCC 偶尔把副词「只」错转成量词「隻」
     res = re.sub(r"(?<=[一-鿿])(?=API|Enter|AI |Battle\.net)|(?:(?<=API)|(?<=Enter)|(?<=Battle\.net))(?=[一-鿿])",
                  " ", res)
-    res = re.sub(r"(?<![公英千海鄰故萬百])里(?![程長])", "裡", res)       # 「副本里」这类 OpenCC 没转
     res = res.replace("臺", "台")                                          # 台灣日常写「台」
     return res
 
@@ -112,6 +133,19 @@ def t(text):
     if _mode != "hant" or not isinstance(text, str):
         return text
     return to_hant(text)
+
+
+def glyph(text):
+    """聊天内容用（队友的中文原话）：繁体模式下只把简体字转成繁体字形，不换词——别人说的话不能替他改词。
+    简体模式原样返回。转完的文字插进翻译页时要带 RAW_TAG，否则钩子还会再过一遍词表。"""
+    if _mode != "hant" or not isinstance(text, str) or not text or not _CJK.search(text) or not _load():
+        return text
+    res = _s2t.convert(text)
+    if "别只" in text:
+        res = res.replace("別隻", "別只")       # OpenCC 已知的一处错转：「别只会打」→「別隻會打」
+    if "臺" not in text:
+        res = res.replace("臺", "台")           # 台服、平台：台湾日常写「台」；对方自己打的「臺」不动
+    return res
 
 
 def to_hans(text):
@@ -130,7 +164,8 @@ def site(path=""):
 
 
 def install_tk_hook():
-    """让所有 Tk 控件的 text / label / 窗口标题、Text 控件插入的文字都过一遍 t()。只装一次。"""
+    """让所有 Tk 控件的 text / label / 窗口标题、Text 控件插入的文字都过一遍 t()。只装一次。
+    例外：Text 控件里带 RAW_TAG 标签的片段（聊天内容）原样插入。"""
     import tkinter
     if getattr(tkinter, "_cb_i18n", False):
         return
@@ -158,9 +193,19 @@ def install_tk_hook():
 
     orig_insert = tkinter.Text.insert
 
+    def is_raw(tags):
+        if isinstance(tags, str):
+            tags = tags.split()
+        return RAW_TAG in (tags or ())
+
     def insert(self, index, chars, *args):
         if _mode == "hant":
-            chars = t(chars)
-            args = tuple(t(a) if i % 2 == 1 and isinstance(a, str) else a for i, a in enumerate(args))
+            # Tk 的参数是「文字, 标签, 文字, 标签…」交替；最后一段文字可以不带标签
+            parts = [chars] + list(args)
+            for i in range(0, len(parts), 2):
+                tags = parts[i + 1] if i + 1 < len(parts) else ()
+                if isinstance(parts[i], str) and not is_raw(tags):
+                    parts[i] = t(parts[i])
+            chars, args = parts[0], tuple(parts[1:])
         return orig_insert(self, index, chars, *args)
     tkinter.Text.insert = insert

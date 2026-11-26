@@ -10,7 +10,7 @@
 ChatBridge = {}
 local CB = ChatBridge
 
-CB.VERSION = "2.9"
+CB.VERSION = "2.10"
 CB.COLS, CB.ROWS, CB.CELL, CB.HEADER = 64, 8, 4, 8
 CB.MAX_PAYLOAD = math.floor((CB.COLS * CB.ROWS - CB.HEADER) * 6 / 8) - 5
 CB.HOLD = 0.25          -- 每条消息的色块显示秒数
@@ -27,6 +27,12 @@ local HANT = ChatBridge_HANT or {}
 local function L(s)
     if CB.hant then return HANT[s] or s end
     return s
+end
+
+-- 新引擎的「秘密值」：首领战等限制期间，聊天内容、部分框体数值会变成秘密值，拿它做比较、拼接、
+-- 算术都会报错。凡是从游戏接口拿回来的东西，用之前先过这一关。（放在文件最前面：下面查名字、遮挡检测都要用）
+local function isSecret(v)
+    return type(issecretvalue) == "function" and issecretvalue(v) and true or false
 end
 
 -- 识别标记与校准格（每项是 r,g,b 的档位 0~3）
@@ -112,18 +118,27 @@ end
 -- 直接换进方括号里，翻译服务就不用猜物品名了。查不到（客户端还没缓存这件物品）就留原名。
 ---------------------------------------------------------------------------
 
-local function localName(kind, id)
-    local ok, name
+-- 查一次名字。接口在有的客户端版本里不存在、或者会报错，所以存在才调、调用包 pcall；
+-- 返回的是秘密值、空串或不是字符串，都算没查到（先判秘密值再碰它）。
+local function lookup(fn, arg)
+    if not fn then return nil end
+    local ok, name = pcall(fn, arg)
+    if ok and not isSecret(name) and type(name) == "string" and name ~= "" then return name end
+end
+
+-- rest 是链接里编号后面那一串（":::::::60:::" 之类），只有物品用得上，可以不传。
+local function localName(kind, id, rest)
     if kind == "item" then
-        if C_Item and C_Item.GetItemNameByID then ok, name = pcall(C_Item.GetItemNameByID, id) end
-        if (not ok or not name) and GetItemInfo then ok, name = pcall(GetItemInfo, id) end
+        -- 带随机后缀的装备（「…of the Monkey」/「猎豹之…」）：后缀记在链接编号后面那一串里，
+        -- 只拿编号查到的是不带后缀的基础名。所以先拿整串链接查（返回带后缀的本地名），查不到再退回按编号查。
+        return lookup((C_Item and C_Item.GetItemInfo) or GetItemInfo, "item:" .. id .. (rest or ""))
+            or lookup(C_Item and C_Item.GetItemNameByID, id)
+            or lookup(GetItemInfo, id)
     elseif kind == "spell" or kind == "enchant" then
-        if C_Spell and C_Spell.GetSpellName then ok, name = pcall(C_Spell.GetSpellName, id) end
-        if (not ok or not name) and GetSpellInfo then ok, name = pcall(GetSpellInfo, id) end
+        return lookup(C_Spell and C_Spell.GetSpellName, id) or lookup(GetSpellInfo, id)
     elseif kind == "quest" then
-        if C_QuestLog and C_QuestLog.GetTitleForQuestID then ok, name = pcall(C_QuestLog.GetTitleForQuestID, id) end
+        return lookup(C_QuestLog and C_QuestLog.GetTitleForQuestID, id)
     end
-    if ok and type(name) == "string" and name ~= "" and not (issecretvalue and issecretvalue(name)) then return name end
 end
 CB.LocalName = localName
 
@@ -132,7 +147,7 @@ function CB.LocalizeLinks(text)
     local missing
     text = text:gsub("|H(%a+):(%d+)([^|]*)|h%[(.-)%]|h", function(kind, id, rest, shown)
         id = tonumber(id)
-        local name = id and localName(kind, id)
+        local name = id and localName(kind, id, rest)
         if name then
             return "|H" .. kind .. ":" .. id .. rest .. "|h[" .. name .. "]|h"
         end
@@ -144,9 +159,9 @@ function CB.LocalizeLinks(text)
     return text, missing
 end
 
--- 去掉颜色码、链接、图标等转义，只留纯文本
-function CB.Clean(text)
-    text = CB.LocalizeLinks(text)
+-- 去掉颜色码、链接、图标等转义，只留纯文本。只剥转义、不查名字：
+-- 聊天消息在 onChat 里已经用 LocalizeLinks 查过一遍了（还要靠它知道哪些物品没缓存），这里再查就是重复查。
+function CB.StripEscapes(text)
     text = text:gsub("|c%x%x%x%x%x%x%x%x", "")
     text = text:gsub("|cn[^:]*:", "")
     text = text:gsub("|r", "")
@@ -158,6 +173,12 @@ function CB.Clean(text)
     text = text:gsub("[%c]", " ")
     text = text:gsub("^%s+", ""):gsub("%s+$", "")
     return text
+end
+
+-- 一步到位：链接换成本机名字，再剥成纯文本。手上是没处理过的原文时用这个；
+-- 已经 LocalizeLinks 过的文本直接用 StripEscapes，别再走这里。
+function CB.Clean(text)
+    return CB.StripEscapes((CB.LocalizeLinks(text)))
 end
 
 ---------------------------------------------------------------------------
@@ -214,17 +235,47 @@ end
 
 local queue, seq, shownFor, showing = {}, 0, 0, false
 
+-- 消息分两类。聊天类：各频道的聊天（CODES 里那些类型码）和 /cb test 的测试消息，丢一条、晚几秒都不要紧。
+-- 控制类：其余全部（@ W V U A Q ! ……），是玩家刚做的操作或小程序赖以工作的状态，不能丢、不能久等——
+-- 尤其是 Q：按 Ctrl+T 时输入框已经清空了，这条丢了玩家那句话就没了。
+-- 每条要显示 CB.HOLD 秒，聊天刷屏时排在队尾要等好几秒，所以控制类插到所有还没发的聊天前面。
+-- 不认识的类型码一律当控制类：宁可多保，不误丢。
+local CHAT_CLASS = { T = true }
+for _, code in pairs(CODES) do CHAT_CLASS[code] = true end
+
+-- 队列始终保持「控制类在前、聊天类在后」，两段各自先进先出。返回第一条聊天的位置（没有聊天就是队尾 + 1）
+local function firstChat()
+    for i = 1, #queue do
+        if CHAT_CLASS[queue[i]:sub(1, 1)] then return i end
+    end
+    return #queue + 1
+end
+
 function CB.Enqueue(payload)
-    if #queue >= CB.MAX_QUEUE then table.remove(queue, 1) end
-    queue[#queue + 1] = payload
+    local chat = CHAT_CLASS[payload:sub(1, 1)]
+    local at = firstChat()
+    if #queue >= CB.MAX_QUEUE then
+        if at <= #queue then
+            table.remove(queue, at)          -- 满了：只丢最老的那条聊天
+        elseif chat then
+            return                           -- 排着的全是控制类：新来的聊天让路（它自己就是「最老的聊天」）
+        end                                  -- 新来的也是控制类：照收，宁可队列暂时超长也不丢
+    end
+    if chat then
+        queue[#queue + 1] = payload
+    else
+        table.insert(queue, at, payload)     -- 排在已有控制类后面（控制类之间保持先后）、所有聊天前面
+    end
 end
 
 -- 鼠标滚轮翻看之前的译文：发 "V\t格数\t"；还没发出去的滚动合并成一条
 function CB.EnqueueScroll(delta)
-    local last = queue[#queue]
+    -- 滚动是控制类，新的一条会插在最后一条控制类后面，所以要合并就看那一条（不再是队尾：队尾可能是聊天）
+    local at = firstChat() - 1
+    local last = queue[at]
     local prev = last and tonumber(last:match("^V\t(%-?%d+)\t$"))
     if prev then
-        queue[#queue] = "V\t" .. (prev + delta) .. "\t"
+        queue[at] = "V\t" .. (prev + delta) .. "\t"
     else
         CB.Enqueue("V\t" .. delta .. "\t")
     end
@@ -252,10 +303,6 @@ end)
 -- 聊天事件
 ---------------------------------------------------------------------------
 
-local function isSecret(v)
-    return type(issecretvalue) == "function" and issecretvalue(v) and true or false
-end
-
 local lastSecretNotice = -100
 
 -- 发言人的职业颜色（和官方聊天框一样），拿不到就不带
@@ -269,7 +316,32 @@ local function classHex(guid)
     return string.format("%02x%02x%02x", floor(c.r * 255 + 0.5), floor(c.g * 255 + 0.5), floor(c.b * 255 + 0.5))
 end
 
-local function onChat(event, text, sender, guid)
+-- 战网密语的发言人。事件里的 sender 是「|Kp12|k」这种受保护名字串（只有游戏自己画得出名字），
+-- 剥转义时整个被删掉，所有战网好友都成了「?」，小程序按名字分密语对象时就把不同好友串在一起。
+-- 所以改用事件第 13 个参数 bnSenderID 去查：优先 battleTag（去掉 # 后面的数字），其次 accountName
+-- （它自己也可能是受保护串，剥完是空的就不用）；都拿不到就用「战网好友 + 编号」——不好看，但能把不同的人分开。
+-- bnSenderID 只在本次登录内固定，重新登录后同一个好友的编号可能变。
+local function bnName(bnSenderID)
+    if isSecret(bnSenderID) or type(bnSenderID) ~= "number" then return nil end
+    if C_BattleNet and C_BattleNet.GetAccountInfoByID then
+        local ok, info = pcall(C_BattleNet.GetAccountInfoByID, bnSenderID)
+        if ok and not isSecret(info) and type(info) == "table" then
+            local tag, account = info.battleTag, info.accountName
+            if not isSecret(tag) and type(tag) == "string" then
+                tag = CB.StripEscapes((tag:gsub("#%d*$", "")))
+                if tag ~= "" then return tag end
+            end
+            if not isSecret(account) and type(account) == "string" then
+                account = CB.StripEscapes(account)
+                if account ~= "" then return account end
+            end
+        end
+    end
+    return L("战网好友") .. bnSenderID
+end
+
+-- bnSenderID 只有战网密语用得上（事件第 13 个参数），别的频道传 nil 就行
+local function onChat(event, text, sender, guid, bnSenderID)
     local code = CODES[event]
     if not code or not ChatBridgeDB.enabled then return end
     if not ChatBridgeDB.subs[code] then return end   -- 没订阅这个频道
@@ -285,31 +357,40 @@ local function onChat(event, text, sender, guid)
     end
     if type(text) ~= "string" or text == "" then return end
 
+    -- 自己说的话不用翻。优先用 GUID 认人：只比名字的话，跨服同名的别人也会被当成自己、他的话就不翻了。
+    -- 拿不到 GUID（消息没带、老客户端没有 UnitGUID、是秘密值）时才退回下面的比名字。
+    local myGuid
+    if UnitGUID and not isSecret(guid) and type(guid) == "string" and guid ~= "" then
+        local ok, mine = pcall(UnitGUID, "player")
+        if ok and not isSecret(mine) and type(mine) == "string" and mine ~= "" then myGuid = mine end
+    end
+    if myGuid and guid == myGuid then return end
+
     local name = "?"
-    if not isSecret(sender) and type(sender) == "string" and sender ~= "" then
+    if code == "B" then name = bnName(bnSenderID) or "?" end
+    if name == "?" and not isSecret(sender) and type(sender) == "string" and sender ~= "" then
         name = Ambiguate and Ambiguate(sender, "short") or sender
-        if name == UnitName("player") then return end -- 自己说的话不用翻
-        name = CB.Clean(name)
+        if not myGuid and name == UnitName("player") then return end -- 没有 GUID 可比时的老办法
+        name = CB.StripEscapes(name)
         if name == "" then name = "?" end
     end
 
-    -- 链接里有本机还没缓存的物品：让客户端去取名字，0.4 秒后再发这一条（取不到就用原名）
-    if not CB.retrying and C_Timer and C_Timer.After and text:find("|Hitem:", 1, true) then
-        local _, missing = CB.LocalizeLinks(text)
-        if missing then
-            for _, id in ipairs(missing) do
-                if C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, id) end
-            end
-            C_Timer.After(0.4, function()
-                CB.retrying = true
-                pcall(CB.OnChat, event, text, sender, guid)
-                CB.retrying = false
-            end)
-            return
+    -- 链接换成本机客户端里的名字。整条消息只在这里查一遍，后面只剥转义（StripEscapes），不要再调 Clean。
+    -- 链接里有本机还没缓存的物品：让客户端去取名字，0.4 秒后把这条消息从头再走一遍（那次不再等，取不到就用原名）
+    local localized, missing = CB.LocalizeLinks(text)
+    if missing and not CB.retrying and C_Timer and C_Timer.After then
+        for _, id in ipairs(missing) do
+            if C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, id) end
         end
+        C_Timer.After(0.4, function()
+            CB.retrying = true
+            pcall(CB.OnChat, event, text, sender, guid, bnSenderID)
+            CB.retrying = false
+        end)
+        return
     end
 
-    local clean = CB.Clean(text)
+    local clean = CB.StripEscapes(localized)
     if clean == "" then return end
     -- 有聊天要翻的时候，如果翻译页位置有一阵没发了，顺手先补发一次：
     -- 小程序可能是进游戏以后才启动的，错过了加载时发的那次
@@ -353,14 +434,28 @@ function CB.SendOutgoing(editBox)
     if text == "" then return end
     -- 这句话里插了物品 / 技能链接（Shift+点击）：先换成 {1} {2} 占位符再送去翻，链接本身记在这里；
     -- 译文贴回聊天框时再把占位符换回真链接，发出去的还是能点的链接。
-    local links = {}
-    text = text:gsub("|c%x%x%x%x%x%x%x%x|H.-|h.-|h|r", function(link)
-        links[#links + 1] = link
-        return "{" .. #links .. "}"
+    --
+    -- 连着按两次 Ctrl+T（上一句的译文还没贴回来）时两句话不能互相盖掉链接：
+    --   * 这一句不带链接：完全不碰上一句记下的链接；
+    --   * 这一句也带链接：编号接着上一句往后排（上一句用了 {1} {2}，这一句就从 {3} 起），
+    --     两句的链接记在同一张表里，哪句译文先贴回来都能各自换对。小程序对 {数字} 一视同仁，不要求从 1 开始。
+    -- 表清空（都换回去了）或过期（60 秒没人用）后编号回到 {1}。
+    -- 限制：译文不带请求标识，如果玩家把占位符手动删了，那条链接会留在表里直到过期，期间编号不回 1，不影响使用。
+    local links, base = CB.outLinks, CB.outLinkTop or 0
+    if not links or GetTime() - (CB.outLinksAt or 0) > 60 then links, base = {}, 0 end
+    local top = base
+    -- 链接开头的颜色有两种写法：老的「|c + 8 位十六进制」（|cffa335ee），新引擎的「|cn名字:」（|cnIQ4:）。
+    -- Lua 的匹配没有「或」，所以先宽松地抓「|c…紧跟 |H」，再在函数里核对颜色部分是不是这两种之一，不是就原样留着。
+    text = text:gsub("(|c[^|]*)(|H.-|h.-|h|r)", function(color, body)
+        if not (color:find("^|c%x%x%x%x%x%x%x%x$") or color:find("^|cn[^:]*:$")) then return nil end
+        top = top + 1
+        links[top] = color .. body
+        return "{" .. top .. "}"
     end)
-    text = text:gsub("|H.-|h(.-)|h", "%1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
-    CB.outLinks = #links > 0 and links or nil
-    CB.outLinksAt = GetTime()
+    text = text:gsub("|H.-|h(.-)|h", "%1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|cn[^:]*:", ""):gsub("|r", "")
+    if top > base then
+        CB.outLinks, CB.outLinkTop, CB.outLinksAt = links, top, GetTime()
+    end
     CB.Enqueue("Q\t\t" .. text)
     editBox:SetText("")
 end
@@ -369,36 +464,60 @@ end
 function CB.RestoreLinks(editBox)
     local links = CB.outLinks
     if not links then return end
-    if GetTime() - (CB.outLinksAt or 0) > 60 then CB.outLinks = nil return end
+    if GetTime() - (CB.outLinksAt or 0) > 60 then CB.outLinks, CB.outLinkTop = nil, nil return end
     local text = editBox:GetText()
     if isSecret(text) or type(text) ~= "string" or not text:find("{%d+}") then return end
-    local n
-    text, n = text:gsub("{(%d+)}", function(i) return links[tonumber(i)] end)
-    if n > 0 then
-        CB.outLinks = nil
-        editBox:SetText(text)
+    -- 只换、只划掉这次真用到的编号：表里可能还有另一句话的链接在等它的译文（见 SendOutgoing）。
+    -- 用到的编号等整段换完再划掉，同一个占位符在译文里出现两次也都能换。
+    local used = {}
+    text = text:gsub("{(%d+)}", function(i)
+        i = tonumber(i)
+        if links[i] then used[#used + 1] = i end
+        return links[i]
+    end)
+    if #used > 0 then
+        for _, i in ipairs(used) do links[i] = nil end
+        if next(links) == nil then CB.outLinks, CB.outLinkTop = nil, nil end
+        editBox:SetText(text)       -- 放在最后：SetText 会再触发 OnTextChanged 进到这里，那时表必须已经更新好
     end
 end
 
+local function hookEditBox(box)
+    if not box or box.chatBridgeHooked then return end
+    box.chatBridgeHooked = true
+    box:HookScript("OnKeyDown", function(self, key)
+        if key == "T" and IsControlKeyDown() and not IsAltKeyDown() then
+            CB.SendOutgoing(self)
+        end
+    end)
+    box:HookScript("OnTextChanged", function(self, userInput)
+        if CB.outLinks then CB.RestoreLinks(self) end
+        if not userInput then return end
+        local text = self:GetText()
+        if isSecret(text) or type(text) ~= "string" then return end
+        if endsWithSuffix(text) then CB.SendOutgoing(self) end
+    end)
+end
+
+-- 可以反复跑：挂过的输入框有 chatBridgeHooked 标记，不会重复挂。
 local function hookEditBoxes()
     for i = 1, (NUM_CHAT_WINDOWS or 10) do
-        local box = _G["ChatFrame" .. i .. "EditBox"]
-        if box and not box.chatBridgeHooked then
-            box.chatBridgeHooked = true
-            box:HookScript("OnKeyDown", function(self, key)
-                if key == "T" and IsControlKeyDown() and not IsAltKeyDown() then
-                    CB.SendOutgoing(self)
-                end
-            end)
-            box:HookScript("OnTextChanged", function(self, userInput)
-                if CB.outLinks then CB.RestoreLinks(self) end
-                if not userInput then return end
-                local text = self:GetText()
-                if isSecret(text) or type(text) ~= "string" then return end
-                if endsWithSuffix(text) then CB.SendOutgoing(self) end
-            end)
+        hookEditBox(_G["ChatFrame" .. i .. "EditBox"])
+    end
+    -- 临时聊天窗口（把密语拉成独立窗口，ChatFrame11 起）的编号在 NUM_CHAT_WINDOWS 之外，
+    -- 游戏把所有聊天窗口的名字（含临时的）登记在 CHAT_FRAMES 表里，有这张表就照着再过一遍。
+    if type(CHAT_FRAMES) == "table" then
+        for _, frameName in ipairs(CHAT_FRAMES) do
+            if type(frameName) == "string" then hookEditBox(_G[frameName .. "EditBox"]) end
         end
     end
+end
+
+-- 临时聊天窗口是用到时才建的，进游戏时那一遍挂不到；游戏每开一个临时窗口，就再过一遍。只装一次。
+local tempWindowHooked = false
+local function watchTemporaryWindows()
+    if tempWindowHooked or not hooksecurefunc or not FCF_OpenTemporaryWindow then return end
+    tempWindowHooked = pcall(hooksecurefunc, "FCF_OpenTemporaryWindow", function() pcall(hookEditBoxes) end)
 end
 
 ---------------------------------------------------------------------------
@@ -433,8 +552,12 @@ for i = 1, 13 do COVER_FRAMES[#COVER_FRAMES + 1] = "ContainerFrame" .. i end
 
 local function screenBox(f)
     local l, b, w, h = f:GetRect()
+    -- 新引擎在战斗 / 副本限制期间，暴雪自己的框体可能返回秘密数值，拿来比较、做算术都会报错。
+    -- 读到秘密值就当这个框体不存在（不参与遮挡判断）。要先判秘密值，再做下面的真假判断和乘法。
+    if isSecret(l) or isSecret(b) or isSecret(w) or isSecret(h) then return nil end
     if not (l and b and w and h) then return nil end
     local s = f:GetEffectiveScale()
+    if isSecret(s) or not s then return nil end
     return l * s, b * s, (l + w) * s, (b + h) * s
 end
 
@@ -444,17 +567,24 @@ local function overlaps(f, pl, pb, pr, pt)
     return l ~= nil and l < pr and r > pl and b < pt and t > pb
 end
 
+-- 一个框体查出错（别人的框体，什么状态都可能有）只当它没盖住，不能连累其他框体的判断，
+-- 更不能让错误冒到 OnUpdate / 聊天处理里去（sendRect 每 0.3 秒跑一次，聊天来了也会跑）。
+local function covers(f, pl, pb, pr, pt)
+    local ok, hit = pcall(overlaps, f, pl, pb, pr, pt)
+    return ok and hit == true
+end
+
 function CB.PageCovered()
     if not panel then return false end
     local pl, pb, pr, pt = screenBox(panel)
     if not pl then return false end
     for _, name in ipairs(COVER_FRAMES) do
-        if overlaps(_G[name], pl, pb, pr, pt) then return true end
+        if covers(_G[name], pl, pb, pr, pt) then return true end
     end
     if GetUIPanel then                       -- 其他插件也会把窗口登记成游戏面板
         for _, where in ipairs({ "left", "center", "right", "doublewide", "fullscreen" }) do
             local ok, f = pcall(GetUIPanel, where)
-            if ok and overlaps(f, pl, pb, pr, pt) then return true end
+            if ok and covers(f, pl, pb, pr, pt) then return true end
         end
     end
     return false
@@ -755,14 +885,16 @@ local function pageTick(elapsed)
         if announceIn[i] <= 0 then
             table.remove(announceIn, i)
             CB.Enqueue("@\t" .. CB.VERSION .. "\t" .. (UnitName("player") or ""))
-            if panel then sendRect(true) end
+            -- pcall：这里跑在 OnUpdate 里，算位置万一出错（比如读到秘密数值）只跳过这一次，
+            -- 不能把后面的补发和定时上报一起带停，也不能每帧往错误框里刷报错。下一轮照常再试。
+            if panel then pcall(sendRect, true) end
         end
     end
     if not panel then return end
     rectTimer = rectTimer + elapsed
     if rectTimer < 0.3 then return end
     rectTimer = 0
-    sendRect(false)      -- 聊天框被拖动、缩放、隐藏时自动通知小程序
+    pcall(sendRect, false)      -- 聊天框被拖动、缩放、隐藏时自动通知小程序（pcall 的原因同上）
 end
 
 function CB.NoteIncoming()
@@ -906,6 +1038,7 @@ events:SetScript("OnEvent", function(_, event, ...)
     elseif event == "PLAYER_ENTERING_WORLD" then
         layout()
         pcall(hookEditBoxes)
+        watchTemporaryWindows()
         CB.Enqueue("@\t" .. CB.VERSION .. "\t" .. (UnitName("player") or ""))
         local ok, err = pcall(buildPage)
         if not ok then print(PREFIX .. L("翻译页没建成: ") .. tostring(err)) end
@@ -922,8 +1055,9 @@ events:SetScript("OnEvent", function(_, event, ...)
     elseif event == "DISPLAY_SIZE_CHANGED" or event == "UI_SCALE_CHANGED" then
         layout()
     else
-        local text, sender, _, _, _, _, _, _, _, _, _, guid = ...
-        local ok, err = pcall(onChat, event, text, sender, guid)
+        -- 聊天事件的参数：1 文本、2 发言人、12 发言人 GUID、13 战网好友编号（只有战网密语有）
+        local text, sender, _, _, _, _, _, _, _, _, _, guid, bnSenderID = ...
+        local ok, err = pcall(onChat, event, text, sender, guid, bnSenderID)
         if not ok and ChatBridgeDB.debug then print(PREFIX .. L("出错: ") .. tostring(err)) end
     end
 end)

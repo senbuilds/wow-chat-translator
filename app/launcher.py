@@ -19,7 +19,9 @@ import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 from tkinter import filedialog
 
@@ -31,6 +33,13 @@ APP_NAME = "魔兽聊天翻译"
 APP_VERSION = os.environ.get("WOWTR_VERSION_OVERRIDE") or version.VERSION     # 环境变量只给测试用
 UPDATE_BASE = app.PUBLIC_ENDPOINT + "/download/"
 UPDATE_MANIFEST = UPDATE_BASE + "latest.json"
+UPDATE_MAX_BYTES = 200 * 1024 * 1024          # 安装包大小上限：现在几十 MB，超过这个数一定不对，不往磁盘上写
+# 配置文件里由翻译窗口那个进程负责写的键（用户在游戏里换设备编号、拖动窗口、翻译页挪位置）。
+# 启动器只负责写 lang、own_model、device_id / previous_device_ids（「找回余额」里换编号）。
+# device_id 两边都会写，所以启动器保存前要先看一眼盘上的，见 Launcher.sync_cfg。
+OVERLAY_CFG_KEYS = ("device_id", "dock_rect", "geometry")
+WINDOW_TITLE = "ChatBridge " + APP_NAME      # 主窗口标题；第二次打开程序时靠它找到已经开着的那个窗口
+INSTANCE_MUTEX = "Local\\WoWChatTranslatorLauncher"
 ADDON = "ChatBridge"
 FONT = "Microsoft YaHei UI"
 
@@ -106,6 +115,32 @@ def save_settings(settings):
     os.makedirs(os.path.dirname(LAUNCHER_CFG) or ".", exist_ok=True)
     with open(LAUNCHER_CFG, "w", encoding="utf-8") as f:
         json.dump(settings, f, ensure_ascii=False, indent=2)
+
+
+def log_error(what):
+    """把刚接住的异常写到 stderr。打包版没有控制台（stderr 可能是 None），写不了就算了，不能因为记日志再出错。"""
+    try:
+        sys.stderr.write("%s\n%s\n" % (what, traceback.format_exc()))
+    except Exception:
+        pass
+
+
+def url_allowed(url, endpoint):
+    """服务器返回的链接能不能交给浏览器打开。
+    Windows 上 webbrowser.open 最后走的是 os.startfile，给它本地路径或 \\\\主机\\共享 这种路径就会直接运行，
+    所以只放行 https 的官网地址；用户把 endpoint 改成自己的服务器时，放行 https 且主机名和它相同的地址。"""
+    if not isinstance(url, str) or not url:
+        return False
+    # 反斜杠：浏览器把它当 /，而下面的主机名解析不会，「https://别的主机\@你的主机/」会两边看法不一致，直接不收
+    if any(ord(c) <= 32 or c == "\\" for c in url):
+        return False
+    if url.startswith(app.PUBLIC_ENDPOINT.rstrip("/") + "/"):
+        return True
+    try:
+        mine, theirs = urllib.parse.urlsplit(str(endpoint or "")), urllib.parse.urlsplit(url)
+        return url.startswith("https://") and bool(theirs.hostname) and theirs.hostname == mine.hostname
+    except ValueError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -206,27 +241,45 @@ def fetch_latest():
 
 
 def download_update(info, progress):
-    """下载安装包到临时目录并核对 SHA-256。返回 (文件路径, 错误说明)。"""
-    path = os.path.join(tempfile.gettempdir(), "WoWTranslatorSetup-%s.exe" % info["version"])
-    part, digest, done = path + ".part", hashlib.sha256(), 0
+    """下载安装包到临时目录并核对 SHA-256。返回 (文件路径, 错误说明)。
+    在后台线程里跑，绝不能抛异常：抛了就没人发 update_ready 事件，界面会永远停在「下载中」。"""
+    part = None
     try:
-        with urllib.request.urlopen(info["url"], timeout=30) as r, open(part, "wb") as f:
-            total = int(r.headers.get("Content-Length") or info.get("size") or 0)
-            while True:
-                chunk = r.read(256 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-                digest.update(chunk)
-                done += len(chunk)
-                progress(done, total)
+        path = os.path.join(tempfile.gettempdir(), "WoWTranslatorSetup-%s.exe" % info["version"])
+        # 临时文件名带随机后缀：万一同时有两次下载（或上次的残留被别的程序占着），也不会写到同一个文件上
+        part = "%s.%s.part" % (path, os.urandom(4).hex())
+        digest, done = hashlib.sha256(), 0
+        try:
+            with urllib.request.urlopen(info["url"], timeout=30) as r, open(part, "wb") as f:
+                total = int(r.headers.get("Content-Length") or info.get("size") or 0)
+                if total > UPDATE_MAX_BYTES:
+                    return None, "安装包大得不正常，没有下载。请稍后再试"
+                while True:
+                    chunk = r.read(256 * 1024)
+                    if not chunk:
+                        break
+                    done += len(chunk)
+                    if done > UPDATE_MAX_BYTES:          # 服务器没报大小或者报小了：按实际收到的算
+                        return None, "安装包大得不正常，已经停止下载。请稍后再试"
+                    f.write(chunk)
+                    digest.update(chunk)
+                    progress(done, total)
+        except Exception:
+            return None, "下载失败，请检查网络后再试"
+        if digest.hexdigest() != info["sha256"]:
+            return None, "下载的文件校验不对，已经丢掉了。请稍后再试"
+        os.replace(part, path)
+        part = None                                      # 已经改名成正式文件，下面不用再删
+        return path, None
     except Exception:
-        return None, "下载失败，请检查网络后再试"
-    if digest.hexdigest() != info["sha256"]:
-        os.remove(part)
-        return None, "下载的文件校验不对，已经丢掉了。请稍后再试"
-    os.replace(part, path)
-    return path, None
+        log_error("保存安装包出错")
+        return None, "安装包没能存下来，请稍后再试"
+    finally:
+        if part:
+            try:
+                os.remove(part)
+            except OSError:
+                pass                                     # 没建出来或被占用：留在临时目录里，系统会清
 
 
 def desktop_dir():
@@ -409,9 +462,11 @@ class Launcher:
         self.proc = None
         self.events = queue.Queue()
         self.service_ok = None
+        self.closed = False          # 窗口已经销毁（正在退出）：各个定时循环看到它就不再排下一次
+        self.updating = False        # 正在下载 / 安装更新：两个「立即更新」按钮都不能再点
 
         root = self.root = tk.Tk()
-        root.title("ChatBridge " + APP_NAME)
+        root.title(WINDOW_TITLE)
         dark_titlebar(root)
         root.configure(bg=BG)
         root.resizable(False, False)
@@ -844,9 +899,15 @@ class Launcher:
         args = [sys.executable] if app.FROZEN else [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")]
         if self.running():
             args.append("--autostart")
-        subprocess.Popen(args, close_fds=True)
-        self.stop()
-        self.root.destroy()
+        # 新的启动器起来时这个旧的还没退出：先把「只开一个」的锁放掉，不然新的会以为已经开着一个，自己退出
+        release_single_instance()
+        try:
+            subprocess.Popen(args, close_fds=True)
+        except OSError:
+            claim_single_instance()
+            self.say("语言已经换了，但没能自动重新打开。关掉再打开一次就行。", WARN)
+            return
+        self.shutdown()
 
     # --- 启动和停止 ---
     def overlay_command(self):
@@ -891,9 +952,31 @@ class Launcher:
         elif not self.run_hint.cget("text") or self.run_hint.cget("text") == i18n.t("窗口可以最小化，别关"):
             self.run_hint.configure(text="每次玩之前点「启动」")
 
+    def again(self, ms, fn):
+        """定时循环排下一次。所有自己给自己排期的循环（pump、tick、定时查余额…）都用它，并且放在 finally 里调：
+        循环里某一步出了错也照样有下一次，不然启动器会从此「按钮点了没反应」。窗口销毁以后就不排了。"""
+        if self.closed:
+            return
+        try:
+            self.root.after(ms, fn)
+        except tk.TclError:
+            pass
+
+    def shutdown(self):
+        """停掉翻译进程并关窗口。先立起 closed，免得还在跑的定时循环去碰已经销毁的控件。"""
+        self.closed = True
+        try:
+            self.stop()
+        finally:
+            self.root.destroy()
+
     def tick(self):
-        self.tick_once()
-        self.root.after(1000, self.tick)
+        try:
+            self.tick_once()
+        except Exception:
+            log_error("刷新运行状态出错")
+        finally:
+            self.again(1000, self.tick)
 
     # --- 额度 ---
     def background(self, kind, fn):
@@ -922,12 +1005,20 @@ class Launcher:
         return ";".join(parts)
 
     def refresh_account(self):
-        self.background("account", lambda: self.relay.account(self.state_header()))
-        self.root.after(60000, self.refresh_account)
+        try:
+            self.background("account", lambda: self.relay.account(self.state_header()))
+        except Exception:
+            log_error("定时查余额出错")
+        finally:
+            self.again(60000, self.refresh_account)
 
     def refresh_service(self):
-        self.background("service", lambda: (self.relay.healthy(),))
-        self.root.after(30000, self.refresh_service)
+        try:
+            self.background("service", lambda: (self.relay.healthy(),))
+        except Exception:
+            log_error("定时查服务状态出错")
+        finally:
+            self.again(30000, self.refresh_service)
 
     # --- 检查更新 ---
     def update_action(self):
@@ -943,6 +1034,8 @@ class Launcher:
         self.background("update_info", lambda: fetch_latest() + (manual,))
 
     def on_update_info(self, info, err, manual):
+        if self.updating:                # 已经在下载了：这次检查的结果不用管，更不能把按钮恢复成可点
+            return
         self.update_button.set(enabled=True)
         if err:
             self.update_label.configure(text=("版本 %s · 检查更新失败：%s" % (APP_VERSION, err)) if manual
@@ -975,9 +1068,17 @@ class Launcher:
                                         fg=GOOD if manual else DIM)
             write_update_hint({})
 
+    def set_update_busy(self, busy, text="立即更新"):
+        """页脚的「立即更新」和横幅上的那个按钮是同一件事的两个入口，必须一起禁用、一起恢复。"""
+        self.updating = busy
+        self.update_button.set(text, enabled=not busy)
+        self.update_banner_button.set(text, enabled=not busy)
+
     def start_update(self):
         info = self.pending_update
-        self.update_button.set("下载中", enabled=False)
+        if self.updating or not info:        # 已经在下载：重复点击不再起第二个下载线程
+            return
+        self.set_update_busy(True, "下载中")
         self.update_label.configure(text="正在下载 %s…" % info["version"], fg=GOLD)
 
         def progress(done, total):
@@ -988,24 +1089,31 @@ class Launcher:
     def on_update_ready(self, path, err):
         if err:
             self.update_label.configure(text=err, fg=BAD)
-            self.update_button.set("立即更新", enabled=True)
+            self.set_update_busy(False)
             return
         if not app.FROZEN:
             self.update_label.configure(text="开发版不自动安装。安装包已下载到 %s" % path, fg=WARN)
-            self.update_button.set("立即更新", enabled=True)
+            self.set_update_busy(False)
             return
-        install_dir = os.path.dirname(os.path.abspath(sys.executable))
-        args = [path, "--silent", "--dir", install_dir, "--launch"]
-        if self.running():
-            args.append("--autostart")
-        if not os.path.exists(os.path.join(desktop_dir(), "魔兽聊天翻译.lnk")):
-            args.append("--no-shortcut")              # 用户删掉了桌面图标，就别再给他建回来
-        self.update_label.configure(text="正在安装新版本，马上会自动重新打开…", fg=GOLD)
-        self.root.update()
-        subprocess.Popen(args, cwd=tempfile.gettempdir(), close_fds=True,
-                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x8) | 0x200)   # 0x200 新进程组
-        self.stop()
-        self.root.destroy()
+        try:
+            install_dir = os.path.dirname(os.path.abspath(sys.executable))
+            args = [path, "--silent", "--dir", install_dir, "--launch"]
+            if self.running():
+                args.append("--autostart")
+            if not os.path.exists(os.path.join(desktop_dir(), "魔兽聊天翻译.lnk")):
+                args.append("--no-shortcut")              # 用户删掉了桌面图标，就别再给他建回来
+            self.update_label.configure(text="正在安装新版本，马上会自动重新打开…", fg=GOLD)
+            self.root.update()
+            subprocess.Popen(args, cwd=tempfile.gettempdir(), close_fds=True,
+                             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x8) | 0x200)   # 0x200 新进程组
+        except Exception:
+            # 安装包起不来（多半是杀毒软件把刚下载的 exe 拦了或删了）：留在这个版本，按钮恢复，可以再试
+            log_error("启动安装包出错")
+            self.update_label.configure(text="安装包没能启动，可能被杀毒软件拦了", fg=BAD)
+            self.set_update_busy(False)
+            return
+        # 安装包已经在跑了，它会先关掉本程序再换文件；这里自己先收拾干净退出
+        self.shutdown()
 
     def show_balance(self):
         if self.relay.own:
@@ -1048,16 +1156,26 @@ class Launcher:
         self.cdk_msg.configure(text="正在申请免费试用…", fg=DIM)
         self.background("trial_started", self.relay.start_trial)
 
+    def open_url(self, url):
+        """用浏览器打开服务器返回的链接（领试用、推广码的验证页）。链接不在允许范围内就不打开，返回 False。
+        规则见 url_allowed。打开写死在程序里的官网地址不用走这里。"""
+        if not url_allowed(url, self.cfg.get("endpoint")):
+            return False
+        import webbrowser
+        webbrowser.open(hant_url(url))
+        return True
+
     def on_trial_started(self, url, err):
         self.trial_button.set(enabled=True)
         if not url:
             self.cdk_msg.configure(text="领不了：%s" % err, fg=BAD)
             return
-        import webbrowser
-        webbrowser.open(hant_url(url))
+        if not self.open_url(url):
+            self.cdk_msg.configure(text="链接不对，没有打开。", fg=BAD)
+            return
         self.cdk_msg.configure(text="已在浏览器打开领取页面：点一下「确认你是真人」就到账（15 分钟内有效）。", fg=GOLD)
         self.trial_polls = 36                       # 接下来 3 分钟每 5 秒查一次余额，到账了马上显示
-        self.root.after(5000, self.poll_trial)
+        self.again(5000, self.poll_trial)
 
     def poll_trial(self):
         if self.trial_polls <= 0:
@@ -1068,8 +1186,12 @@ class Launcher:
             self.cdk_msg.configure(text="免费试用已到账：%d 条，30 天内有效。" % self.relay.trial_left, fg=GOOD)
             self.restart_overlay()                  # 翻译在跑的话重启一下：它可能记着「额度用完了」
             return
-        self.background("account", self.relay.account)
-        self.root.after(5000, self.poll_trial)
+        try:
+            self.background("account", self.relay.account)
+        except Exception:
+            log_error("查试用到账出错")
+        finally:
+            self.again(5000, self.poll_trial)
 
     def redeem(self):
         code = self.cdk.get().strip()
@@ -1092,12 +1214,13 @@ class Launcher:
         if not url:
             self.cdk_msg.configure(text="推广码用不了：%s" % err, fg=BAD)
             return
-        import webbrowser
-        webbrowser.open(hant_url(url))
+        if not self.open_url(url):
+            self.cdk_msg.configure(text="链接不对，没有打开。", fg=BAD)
+            return
         self.cdk.delete(0, "end")
         self.cdk_msg.configure(text="已在浏览器打开验证页面，验证一下就到账（15 分钟内有效）。", fg=GOLD)
         self.promo_polls = 36                       # 接下来 3 分钟每 5 秒查一次，到账了马上显示
-        self.root.after(5000, self.poll_promo)
+        self.again(5000, self.poll_promo)
 
     def poll_promo(self):
         if getattr(self, "promo_polls", 0) <= 0:
@@ -1108,8 +1231,12 @@ class Launcher:
             self.cdk_msg.configure(text="推广码已生效，送你的额度已到账。", fg=GOOD)
             self.restart_overlay()
             return
-        self.background("account", self.relay.account)
-        self.root.after(5000, self.poll_promo)
+        try:
+            self.background("account", self.relay.account)
+        except Exception:
+            log_error("查推广码到账出错")
+        finally:
+            self.again(5000, self.poll_promo)
 
     # --- 对话框：找回余额、自带模型 ---
     # --- 反馈 ---
@@ -1237,6 +1364,27 @@ class Launcher:
         win.geometry("+%d+%d" % (max(0, x), max(0, y)))
         win.grab_set()
 
+    def sync_cfg(self):
+        """保存配置之前先调：把盘上由翻译窗口负责的键（OVERLAY_CFG_KEYS）同步进 self.cfg。
+        启动器和翻译窗口各拿着一份启动时读的配置、各自整份写回。不同步的话，用户在游戏里换过设备编号、
+        挪过窗口之后，启动器这边一保存（比如改自带模型）就会用旧值把它们盖回去。
+        只能原地改 self.cfg（self.relay 拿的是同一个 dict）。读不了就跳过，按手上这份存。"""
+        try:
+            with open(app.CONFIG_PATH, encoding="utf-8") as f:
+                disk = json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(disk, dict):
+            return
+        old_device = self.cfg.get("device_id")
+        for name in OVERLAY_CFG_KEYS:
+            if name in disk and not (name == "device_id" and not disk[name]):    # 盘上的编号是空的就不拿它盖掉手上的
+                self.cfg[name] = disk[name]
+        if self.cfg.get("device_id") != old_device:      # 编号在游戏里换过：余额是另一个账户的了，重新查
+            self.relay.balance, self.relay.no_balance = None, False
+            if self.device_label is not None:
+                self.device_label.configure(text=self.device_text())
+
     def restart_overlay(self):
         """改了设备编号或翻译来源：翻译进程正在跑就重启一下，让它读到新配置。"""
         if self.running():
@@ -1244,6 +1392,7 @@ class Launcher:
             self.root.after(500, self.start)
 
     def open_recover(self):
+        self.sync_cfg()                      # 下面要显示「现在这台的编号」：可能在游戏里换过
         win, body = self.dialog("找回余额")
         wrap = int(460 * self.k)
         tk.Label(body, text="余额记在「设备编号」名下。重装系统或换了电脑，把原来那台的设备编号填进来，就能接着用原来的余额。"
@@ -1281,6 +1430,7 @@ class Launcher:
             new = state["checked"]
             if not new:
                 return
+            self.sync_cfg()
             old = self.cfg.get("device_id")
             history = [d for d in self.cfg.get("previous_device_ids", []) if d != new]
             if old and old not in history:
@@ -1347,16 +1497,39 @@ class Launcher:
         key = self.field(body, "密钥（本机模型可以不填）", m.get("api_key", ""), show="•")
         model = self.field(body, "模型名", m.get("model", ""))
 
-        def pick(*_, fill=True):
+        saved_url = (m.get("base_url") or "").rstrip("/")
+        saved_is_preset = any(pv[1] and pv[1] == saved_url for pv in OWN_PROVIDERS)
+        last = {"name": saved}               # 下拉框上一次选的是哪家：重选同一家不算「换了服务商」
+
+        def put(entry, value):
+            entry.delete(0, "end")
+            entry.insert(0, value)
+
+        def pick(*_, fill=True, switched=True):
+            """选了一家服务商。fill：把接口地址和模型名填成这家的；switched：是用户在下拉框里换的（不是刚打开对话框）。
+            换服务商时必须清掉密钥框：不清的话，上一家的密钥会在点「测试」或「保存」后发给新选的这家。
+            例外：切回的正好是已保存配置的那一家，就把已保存的地址、密钥、模型名原样填回去。"""
             pv = OWN_PROVIDERS[names.index(provider.get())]
-            hint.configure(text=i18n.t(pv[3]))
+            note = pv[3]
             if fill and pv[1]:
-                for entry, value in ((url, pv[1]), (model, pv[2])):
-                    entry.delete(0, "end")
-                    entry.insert(0, value)
+                put(url, pv[1])
+                put(model, pv[2])
+            changed, last["name"] = provider.get() != last["name"], provider.get()
+            if switched and changed:
+                back_to_saved = bool(saved_url) and (pv[1] == saved_url or (not pv[1] and not saved_is_preset))
+                if back_to_saved:
+                    put(url, m.get("base_url", ""))
+                    put(key, m.get("api_key", ""))
+                    put(model, m.get("model", ""))
+                else:
+                    if key.get().strip() and not pv[1].startswith("http://127.0.0.1"):   # 本机模型不用密钥，不提这句
+                        note += "\n换了服务商，密钥要重新粘贴。"
+                    key.delete(0, "end")
+            hint.configure(text=i18n.t(note))
 
         provider.trace_add("write", pick)
-        pick(fill=not m.get("base_url"))             # 以前填过的不动；第一次打开按默认那家填好
+        # 打开对话框时：以前填过的一律不动（不能被默认值盖掉）；第一次打开按默认那家填好地址和模型名
+        pick(fill=not m.get("base_url"), switched=False)
         on = tk.BooleanVar(value=bool(m.get("enabled")))
         tk.Checkbutton(body, text="使用自带模型（取消勾选就回到线上翻译服务）", variable=on, bg=BG, fg=TEXT,
                        selectcolor=FIELD, activebackground=BG, activeforeground=GOLD, font=(FONT, 9),
@@ -1392,6 +1565,7 @@ class Launcher:
             c = current()
             if c["enabled"] and not valid(c):
                 return
+            self.sync_cfg()
             self.cfg["own_model"] = c
             app.save_config(self.cfg)
             self.relay.balance, self.relay.no_balance = None, False
@@ -1411,57 +1585,150 @@ class Launcher:
         self.root.after(1200, lambda: self.device_label.configure(fg=DIM))
 
     def pump(self):
+        """每 0.2 秒把后台线程放进队列的结果取出来处理（后台线程不能直接碰界面）。
+        每一项单独接异常：一项出错只影响它自己，后面的照常处理；重新排期放在 finally 里，
+        不然一次异常就会让这个循环断掉，之后所有要等后台结果的按钮都没反应。"""
         try:
-            while True:
-                item = self.events.get_nowait()
-                if item[0] == "account":
-                    self.show_balance()
-                elif item[0] == "update_info":
-                    self.on_update_info(*item[1:])
-                elif item[0] == "update_progress":
-                    done, total = item[1], item[2]
-                    pct = (" %d%%" % (done * 100 // total)) if total else ""
-                    self.update_label.configure(text="正在下载%s（%.1f MB）" % (pct, done / 1e6), fg=GOLD)
-                elif item[0] == "update_ready":
-                    self.on_update_ready(item[1], item[2])
-                elif item[0] == "recover_checked":
-                    self.on_recover_checked(*item[1:])
-                elif item[0] == "own_tested":
-                    text, err, msg = item[1], item[2], item[3]
-                    if msg.winfo_exists():
-                        msg.configure(text=("能用：%s" % text) if text else ("不能用：%s" % err), fg=GOOD if text else BAD)
-                elif item[0] == "promo_started":
-                    self.on_promo_started(item[1], item[2])
-                elif item[0] == "feedback_sent":
-                    self.on_feedback_sent(*item[1:])
-                elif item[0] == "trial_started":
-                    self.on_trial_started(item[1], item[2])
-                elif item[0] == "service":
-                    self.service_ok = item[1]
-                    self.show_balance()
-                elif item[0] == "redeemed":
-                    result, err = item[1], item[2]
-                    self.redeem_button.set(enabled=True)
-                    if result:
-                        self.cdk.delete(0, "end")
-                        self.restart_overlay()      # 翻译在跑的话重启一下：它记着「额度用完了」，要重新查
-                        self.cdk_msg.configure(text="兑换成功：+%s%.2f" % (result.get("currency", "US$"), result["added"]), fg=GOOD)
-                        self.root.after(1500, self.redeem_win.withdraw)
-                    else:
-                        self.cdk_msg.configure(text="兑换失败：%s" % err, fg=BAD)
-                    self.show_balance()
-        except queue.Empty:
-            pass
-        service = {None: "● 连接中…", True: "● 翻译服务正常", False: "● 翻译服务连不上"}[self.service_ok]
-        self.footer.configure(text=service, fg={None: DIM, True: GOOD, False: BAD}[self.service_ok])
-        self.root.after(200, self.pump)
+            while not self.closed:
+                try:
+                    item = self.events.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self.handle_event(item)
+                except Exception:
+                    log_error("处理事件 %r 出错" % (item[0] if item else item,))
+            if not self.closed:
+                service = {None: "● 连接中…", True: "● 翻译服务正常", False: "● 翻译服务连不上"}[self.service_ok]
+                self.footer.configure(text=service, fg={None: DIM, True: GOOD, False: BAD}[self.service_ok])
+        except Exception:
+            log_error("刷新界面出错")
+        finally:
+            self.again(200, self.pump)
+
+    def handle_event(self, item):
+        if item[0] == "account":
+            self.show_balance()
+        elif item[0] == "update_info":
+            self.on_update_info(*item[1:])
+        elif item[0] == "update_progress":
+            done, total = item[1], item[2]
+            pct = (" %d%%" % (done * 100 // total)) if total else ""
+            self.update_label.configure(text="正在下载%s（%.1f MB）" % (pct, done / 1e6), fg=GOLD)
+        elif item[0] == "update_ready":
+            self.on_update_ready(item[1], item[2])
+        elif item[0] == "recover_checked":
+            self.on_recover_checked(*item[1:])
+        elif item[0] == "own_tested":
+            text, err, msg = item[1], item[2], item[3]
+            if msg.winfo_exists():
+                msg.configure(text=("能用：%s" % text) if text else ("不能用：%s" % err), fg=GOOD if text else BAD)
+        elif item[0] == "promo_started":
+            self.on_promo_started(item[1], item[2])
+        elif item[0] == "feedback_sent":
+            self.on_feedback_sent(*item[1:])
+        elif item[0] == "trial_started":
+            self.on_trial_started(item[1], item[2])
+        elif item[0] == "service":
+            self.service_ok = item[1]
+            self.show_balance()
+        elif item[0] == "redeemed":
+            result, err = item[1], item[2]
+            self.redeem_button.set(enabled=True)
+            if result:
+                self.cdk.delete(0, "end")
+                self.restart_overlay()      # 翻译在跑的话重启一下：它记着「额度用完了」，要重新查
+                self.cdk_msg.configure(text="兑换成功：+%s%.2f" % (result.get("currency", "US$"), result["added"]), fg=GOOD)
+                self.root.after(1500, self.redeem_win.withdraw)
+            else:
+                self.cdk_msg.configure(text="兑换失败：%s" % err, fg=BAD)
+            self.show_balance()
 
     def close(self):
-        self.stop()
-        self.root.destroy()
+        self.shutdown()
 
     def run(self):
         self.root.mainloop()
+
+
+# ---------------------------------------------------------------------------
+# 只开一个启动器：开两个的话各拿一份配置互相覆盖，还会各起一个翻译进程。
+# 用系统的命名互斥量当锁：进程结束（包括被 taskkill）系统会自动收回，不会留下「锁死」的残留。
+# 只有启动器要这个锁；同一个 exe 带 --overlay 跑的翻译进程不经过这里。
+# ---------------------------------------------------------------------------
+
+_instance_mutex = None           # 锁的句柄。要一直留着：句柄一关，锁就没了
+
+
+def show_running_launcher():
+    """把已经开着的启动器窗口提到前面。找到了返回 True。"""
+    titles = [WINDOW_TITLE]
+    try:
+        titles.append(i18n.to_hant(WINDOW_TITLE))        # 那个启动器可能是繁体界面，标题也是繁体的
+    except Exception:
+        pass
+    try:
+        user32 = ctypes.WinDLL("user32")
+        user32.FindWindowW.restype = ctypes.c_void_p     # 窗口句柄是指针大小，默认的 int 在 64 位上会截断
+        user32.FindWindowW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p]
+        for fn in (user32.IsIconic, user32.SetForegroundWindow):
+            fn.argtypes = [ctypes.c_void_p]
+        user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        for title in titles:
+            hwnd = user32.FindWindowW(None, title)
+            if hwnd:
+                if user32.IsIconic(hwnd):
+                    user32.ShowWindow(hwnd, 9)           # SW_RESTORE：最小化了就还原
+                user32.SetForegroundWindow(hwnd)
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def claim_single_instance():
+    """拿「只开一个启动器」的锁。返回 True = 可以继续启动；False = 已经开着一个，并且已经把它提到前面了。
+
+    锁被占着时不马上下结论，隔 0.25 秒再试，最多约 3 秒。原因是两种正常情况下旧进程会晚一点才消失：
+    - 自动更新：安装包先 taskkill 旧启动器、等它退出，再打开新的（见 installer/setup.py 的 stop_old_version）。
+      正常情况下新的起来时旧的已经没了，重试只是保险。
+    - 旧启动器正在退出：窗口已经销毁但进程还没走完。
+    判断「真的已经开着一个」的依据是找得到它的窗口；锁被占着却一直找不到窗口（极少见，比如那个进程卡死了），
+    就照常启动：宁可偶尔多开一个，也不能让用户怎么点都打不开程序。"""
+    global _instance_mutex
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    except Exception:
+        return True                                      # 不是 Windows（开发机上跑测试）：不管
+    for _ in range(12):
+        ctypes.set_last_error(0)
+        handle = kernel32.CreateMutexW(None, False, INSTANCE_MUTEX)
+        err = ctypes.get_last_error()
+        if handle and err != 183:                        # 183 = ERROR_ALREADY_EXISTS；不是它就说明锁是我们新建的
+            _instance_mutex = handle
+            return True
+        if handle:
+            kernel32.CloseHandle(handle)
+        elif err != 5:                                   # 5 = 拒绝访问：锁在一个「以管理员身份运行」的启动器手里，也算已存在
+            return True                                  # 其他原因建不了锁：照常启动
+        if show_running_launcher():
+            return False
+        time.sleep(0.25)
+    return True
+
+
+def release_single_instance():
+    """主动放掉锁。只在「自己马上要退出、并且已经要开一个新的启动器接班」时用（切换简体 / 繁体）。"""
+    global _instance_mutex
+    if _instance_mutex:
+        try:
+            ctypes.WinDLL("kernel32").CloseHandle(ctypes.c_void_p(_instance_mutex))
+        except Exception:
+            pass
+        _instance_mutex = None
 
 
 def main():
@@ -1469,6 +1736,8 @@ def main():
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
         pass
+    if not claim_single_instance():
+        return
     Launcher().run()
 
 

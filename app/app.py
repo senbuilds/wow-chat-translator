@@ -3,8 +3,9 @@
 译文显示在游戏聊天框的「翻译」页上（插件画页签和底板，本程序把文字盖在上面）。
 
 读游戏窗口左上角的色块（ChatBridge 插件画的），解码出聊天，交给翻译服务，显示在悬浮窗里。
-下方输入框：打中文，回车翻成英文并复制到剪贴板，回游戏自己粘贴发送。
-本程序只读屏幕像素，不读游戏内存，不往游戏里发送任何按键。
+发消息：在游戏聊天框里打中文，按 Ctrl+T；程序翻成英文放进剪贴板，并且只在游戏是当前窗口时替你按一次 Ctrl+V
+贴进聊天框。不按回车，发不发由你自己决定。
+本程序只读屏幕像素，不读游戏内存；除了上面这一次 Ctrl+V，不往游戏里发送任何按键。
 """
 import ctypes
 import ctypes.wintypes as wt
@@ -17,11 +18,32 @@ import sys
 import threading
 import time
 import tkinter as tk
+import traceback
 import urllib.error
 import urllib.request
 
 import collections
 import codec
+import i18n
+
+# 翻译页里的聊天内容（译文、发言人名字、物品名、队友原话）带这个标签插入：繁体模式下 i18n 的钩子不转换它。
+# 没带这个标签的片段都会被当成程序自己的提示、按台湾用词表转换——所以往翻译页插别人说的话时一定要带上。
+RAW = i18n.RAW_TAG
+
+_error_seen = {}
+
+
+def log_error(where):
+    """后台循环 / 界面定时循环里出了没料到的错：写到 stderr 就继续，循环不能因为一条坏数据停掉。
+    同一处 10 秒内只写一次，免得每 0.1 秒刷一屏。安装版没有控制台，写不出去就算了。"""
+    try:
+        now = time.monotonic()
+        if now - _error_seen.get(where, -1e9) < 10:
+            return
+        _error_seen[where] = now
+        sys.stderr.write("[%s] %s\n" % (where, traceback.format_exc()))
+    except Exception:
+        pass
 
 HERE = os.path.dirname(os.path.abspath(sys.argv[0]))
 FROZEN = bool(getattr(sys, "frozen", False))       # 打包成 exe 分发给别人的版本
@@ -51,7 +73,13 @@ def update_hint(current):
     except (OSError, ValueError, AttributeError):
         pass
     return None, False
-WOW_TITLES = ("魔兽世界", "World of Warcraft")
+WOW_TITLES = ("魔兽世界", "魔獸世界", "World of Warcraft")       # 国服、台服、英文客户端的窗口标题
+# 资源管理器打开一个叫「World of Warcraft」的文件夹时，窗口标题和游戏一模一样：按窗口类名排除
+NOT_GAME_CLASSES = ("CabinetWClass", "ExploreWClass")
+
+
+def is_game_window(title, class_name):
+    return title in WOW_TITLES and class_name not in NOT_GAME_CLASSES
 FONT = "Microsoft YaHei UI"
 
 DEFAULTS = {
@@ -78,24 +106,105 @@ CHANNELS = {
 }
 
 
+_config_lock = threading.Lock()
+
+
+def _read_config_file(path):
+    """读一份配置文件，返回 dict。不存在抛 FileNotFoundError；内容坏了（不是 JSON、不是对象、编码不对）抛 ValueError。"""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("config is not a JSON object")
+    return data
+
+
+def _read_saved_config():
+    """盘上现在存的配置（不合并默认值）。主文件坏了就用上次保存时留的 .bak；没有文件、或者两份都读不了，返回 None。"""
+    try:
+        return _read_config_file(CONFIG_PATH)
+    except FileNotFoundError:
+        return None
+    except ValueError:
+        pass
+    try:
+        return _read_config_file(CONFIG_PATH + ".bak")
+    except (OSError, ValueError):
+        return None
+
+
 def load_config():
     cfg = dict(DEFAULTS)
-    try:
-        with open(CONFIG_PATH, encoding="utf-8") as f:
-            cfg.update(json.load(f))
-    except FileNotFoundError:
-        pass
-    cfg["own_model"] = dict(DEFAULTS["own_model"], **(cfg.get("own_model") or {}))   # 别和默认值共用一个 dict
+    saved = _read_saved_config()
+    if saved is None and os.path.exists(CONFIG_PATH):
+        # 文件在、但它和备份都读不了：按默认值启动，不能因为配置坏了就打不开程序。
+        # 坏文件挪到一边留着（下面会生成新的设备编号并保存；旧编号也许还能从坏文件里手工找回来）
+        try:
+            os.replace(CONFIG_PATH, CONFIG_PATH + ".broken")
+        except OSError:
+            pass
+    cfg.update(saved or {})
+    own = cfg.get("own_model")
+    cfg["own_model"] = dict(DEFAULTS["own_model"], **(own if isinstance(own, dict) else {}))   # 别和默认值共用一个 dict
     if not cfg.get("token") and not cfg.get("device_id"):
         cfg["device_id"] = "d_" + secrets.token_hex(16)
         save_config(cfg)
     return cfg
 
 
-def save_config(cfg):
-    os.makedirs(os.path.dirname(CONFIG_PATH) or ".", exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+def _backup_config():
+    """覆盖之前把现在的配置留一份 config.json.bak。只备份读得出来的：坏文件不能把好的备份顶掉。"""
+    try:
+        with open(CONFIG_PATH, "rb") as f:
+            raw = f.read()
+        if not isinstance(json.loads(raw.decode("utf-8")), dict):
+            return
+        tmp = "%s.bak.%d.tmp" % (CONFIG_PATH, os.getpid())
+        with open(tmp, "wb") as f:
+            f.write(raw)
+        os.replace(tmp, CONFIG_PATH + ".bak")
+    except (OSError, ValueError):
+        pass
+
+
+def save_config(cfg, only=None):
+    """保存配置。先写临时文件再整个换上去：写到一半断电 / 被杀，原来的文件还是完整的。
+
+    only：一组键名。翻译窗口进程和启动器各自拿着一份启动时读的配置，谁整份写回都会把对方刚改的值
+    （比如新换的设备编号）盖回旧的。所以只想存自己那几个键时传 only：重新读盘上现在的配置，只更新这几个键再写回。
+    不传 only 就是整份保存（启动器在用）。"""
+    with _config_lock:
+        data = cfg
+        if only is not None:
+            saved = _read_saved_config()
+            if saved is not None:           # 盘上什么都读不到时只好整份写，不然文件里就只剩这几个键、设备编号没了
+                for key in only:
+                    if key in cfg:
+                        saved[key] = cfg[key]
+                    else:
+                        saved.pop(key, None)
+                data = saved
+        os.makedirs(os.path.dirname(CONFIG_PATH) or ".", exist_ok=True)
+        tmp = "%s.%d.tmp" % (CONFIG_PATH, os.getpid())        # 带进程号：两个进程同时保存时不会写同一个临时文件
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            _backup_config()
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, CONFIG_PATH)
+                    break
+                except PermissionError:      # Windows：另一个进程正好开着这个文件在读，稍等再换
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.05)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +227,7 @@ gdi32.BitBlt.argtypes = [wt.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctype
 gdi32.GetDIBits.argtypes = [wt.HDC, wt.HBITMAP, wt.UINT, wt.UINT, ctypes.c_void_p, ctypes.c_void_p, wt.UINT]
 user32.ClientToScreen.argtypes = [wt.HWND, ctypes.POINTER(wt.POINT)]
 user32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+user32.GetClassNameW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
 user32.IsWindowVisible.argtypes = [wt.HWND]
 user32.IsIconic.argtypes = [wt.HWND]
 user32.IsWindow.argtypes = [wt.HWND]
@@ -141,7 +251,9 @@ def find_wow_window():
         if user32.IsWindowVisible(hwnd):
             buf = ctypes.create_unicode_buffer(128)
             user32.GetWindowTextW(hwnd, buf, 128)
-            if buf.value in WOW_TITLES:
+            cls = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, cls, 64)
+            if is_game_window(buf.value, cls.value):
                 rect = wt.RECT()
                 user32.GetClientRect(hwnd, ctypes.byref(rect))
                 if rect.right >= 640 and rect.bottom >= 480:
@@ -194,6 +306,31 @@ class GapCounter:
         return gap if 0 < gap < 200 else 0          # 跳得太多多半是插件重载 / 很久没读，不当成漏读
 
 
+LOST_STREAK, LOST_STREAK_GAP, LOST_HINT_EVERY = 3, 120, 600
+
+
+class LostWatch:
+    """要不要提醒「游戏左上角好像被挡住了」。漏掉的消息补不回来，多数漏读是用户自己切出去造成的，每次都提示
+    反而像程序出错；所以只在游戏一直在前台却连着漏读时说一次：连续 3 次漏读都发生在前台（相邻两次不超过 2 分钟），
+    并且 10 分钟内最多提醒一次。中间只要有一次是切出去漏的，就重新数。"""
+
+    def __init__(self):
+        self.streak, self.last, self.told = 0, None, None
+
+    def feed(self, in_front, now):
+        """每发现一次漏读调一次。in_front：这次是不是在前台漏的；now：单调时钟的秒数。返回这次要不要提醒。"""
+        if not in_front or (self.last is not None and now - self.last > LOST_STREAK_GAP):
+            self.streak = 0
+        self.last = now
+        if not in_front:
+            return False
+        self.streak += 1
+        if self.streak >= LOST_STREAK and (self.told is None or now - self.told >= LOST_HINT_EVERY):
+            self.told, self.streak = now, 0
+            return True
+        return False
+
+
 class CaptureThread(threading.Thread):
     def __init__(self, cfg, out):
         super().__init__(daemon=True)
@@ -206,19 +343,30 @@ class CaptureThread(threading.Thread):
     def run(self):
         grabber = Grabber(codec.WIDTH, codec.HEIGHT)
         last, last_search = None, 0.0
+        # 漏读提醒只该在「游戏一直在前台却读不到」时出（多半是左上角被录屏小窗之类盖住）。切出去再回来也会漏，
+        # 但那不算：所以记下游戏从什么时候起一直在前台（front_since）和上一次读到色块的时间（last_ok），
+        # 发现漏读时比一下：上次读到之后游戏一直没离开过前台，才算「在前台漏的」。
+        front_since, last_ok = None, 0.0
         fixed = self.cfg.get("capture_origin")
         while True:
             time.sleep(0.04)
+            tick = time.monotonic()
             if fixed:
                 x, y = fixed
                 self.window_ok = True
+                front_since = front_since or tick      # 调试模式没有真游戏窗口，当成一直在前台
             else:
                 now = time.time()
                 if (self.hwnd is None or not user32.IsWindow(self.hwnd)) and now - last_search > 2:
                     last_search = now
                     self.hwnd = find_wow_window()
                 self.window_ok = bool(self.hwnd and user32.IsWindow(self.hwnd))
-                if not self.window_ok or user32.IsIconic(self.hwnd):
+                shown = self.window_ok and not user32.IsIconic(self.hwnd)
+                if not (shown and user32.GetForegroundWindow() == self.hwnd):
+                    front_since = None
+                elif front_since is None:
+                    front_since = tick
+                if not shown:
                     continue
                 pt = wt.POINT(0, 0)
                 user32.ClientToScreen(self.hwnd, ctypes.byref(pt))
@@ -233,8 +381,12 @@ class CaptureThread(threading.Thread):
                 last = frame
                 lost = self.gaps.feed(frame[0], frame[1])
                 if lost:
-                    self.out.put(b"~\t%d\t" % lost)
+                    # 「~」是本程序自己塞进队列的记号，不是插件发的色块：漏了几条 \t 是不是在前台漏的（1 / 0）
+                    in_front = front_since is not None and front_since <= last_ok
+                    self.out.put(b"~\t%d\t%d" % (lost, int(in_front)))
                 self.out.put(frame[1])
+            if frame:
+                last_ok = tick
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +419,15 @@ def needs_translation(text):
 
 
 NO_BALANCE = "额度用完了"
+
+_LINK_RE = re.compile(r"(\[[^\[\]]*\])")
+
+
+def chat_glyph(text):
+    """没翻译、原样显示的聊天（队友的中文原话）：繁体模式下只把简体字转成繁体字形，不换成台湾用词——
+    别人说的话不能替他改词（「我没法力了」过词表会变成「我沒辦法力了」）。方括号里是物品 / 技能名，
+    是游戏客户端给的，原样不动。简体模式什么都不做。"""
+    return "".join(part if i % 2 else i18n.glyph(part) for i, part in enumerate(_LINK_RE.split(text)))
 
 # ---------------------------------------------------------------------------
 # 前文：队伍里的对话常常是接话（「i do」「no~」「COPY」），单看一句翻不准。翻队伍类频道的消息时，
@@ -330,11 +491,7 @@ OWN_PROMPTS = {
 
 def _tw_variant():
     """繁体模式：让翻译服务用台湾玩家的说法（台服译名、台湾用语）。"""
-    try:
-        import i18n
-        return i18n.mode() == "hant"
-    except Exception:
-        return False
+    return i18n.mode() == "hant"
 
 
 def _tw_hint(direction):
@@ -348,6 +505,50 @@ def own_model_ready(cfg):
     m = cfg.get("own_model") or {}
     return bool(m.get("enabled") and m.get("model") and
                 str(m.get("base_url", "")).startswith(("http://", "https://")))
+
+
+# 回复长度上限。一句聊天的译文用不了 200 个 token，上限只是防模型跑飞；按量计费只算实际生成的，定高了不多花钱。
+# 带思考的模型（Gemini 2.5、DeepSeek 推理版、本地的推理模型）思考也算在这个上限里，定得太低会思考到一半就被截断、
+# 正文是空的——以前最多 300 就是这样。普通写法给 800；要用 max_completion_tokens 的那类（OpenAI 的推理模型）
+# 思考更多，给 2000。
+OWN_MAX_TOKENS, OWN_MAX_TOKENS_REASONING = 800, 2000
+OWN_EMPTY = "模型没返回内容，换一个模型试试"
+# 记住哪些「地址 + 模型」要用另一种写法（不带 temperature、用 max_completion_tokens）。放在模块级：
+# 每翻一句都会新建一个 OwnModel，记在实例上等于没记，每句都要先失败一次再重试。进程重启后重新试一次即可。
+_own_alt_style = set()
+_SECRET_RE = re.compile(r"(?:sk|pk|rk|key)-[A-Za-z0-9_\-*.]{6,}|Bearer\s+\S+", re.I)
+
+
+def own_error_detail(raw, api_key=""):
+    """从自带模型的报错响应里取一句说明，最多 80 个字符，附在提示后面（各家的 400 含义不一样，光有数字看不出原因）。
+    有的服务会把密钥回显在报错里：整把密钥、长得像密钥的串都打成 ***，不能让它出现在界面和诊断里。"""
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw or "")
+    if text.lstrip().startswith("<"):
+        return ""                               # 网关的 HTML 报错页，没什么可看的
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            data = data.get("error") or data.get("message") or data.get("detail") or ""
+        if isinstance(data, dict):
+            data = data.get("message") or data.get("msg") or data.get("code") or ""
+        text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+    except ValueError:
+        pass
+    text = " ".join(text.split())
+    if api_key:
+        text = text.replace(api_key, "***")
+    return _SECRET_RE.sub("***", text)[:80]
+
+
+def _own_content(out):
+    """从 /chat/completions 的回复里取正文；没有（None、空串、结构不对）就返回空串。"""
+    try:
+        content = out["choices"][0]["message"].get("content")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return ""
+    if isinstance(content, list):               # 有的服务把正文拆成几段 [{"type": "text", "text": …}]
+        content = "".join(part.get("text") or "" for part in content if isinstance(part, dict))
+    return content.strip() if isinstance(content, str) else ""
 
 
 class OwnModel:
@@ -369,30 +570,48 @@ class OwnModel:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
 
+    @staticmethod
+    def _limits(body, alt):
+        """两种写法：普通的带 temperature 和 max_tokens；另一种（Claude、OpenAI 的推理模型）不收 temperature、
+        长度上限叫 max_completion_tokens。"""
+        if alt:
+            return dict(body, max_completion_tokens=OWN_MAX_TOKENS_REASONING)
+        return dict(body, temperature=0.2, max_tokens=OWN_MAX_TOKENS)
+
     def translate(self, text, direction, context=None):
         """返回 (译文, 错误说明)。"""
+        m = self._settings()
         try:
             said = "[Earlier chat]\n%s\n[Message]\n%s" % ("\n".join(context), text) if context else text
             body = {
-                "model": self._settings()["model"],
+                "model": m["model"],
                 "messages": [{"role": "system", "content": OWN_PROMPTS[direction] + _tw_hint(direction)},
                              {"role": "user", "content": said}],
-                "temperature": 0.2,
-                "max_tokens": min(300, 40 + 2 * len(text)),
             }
+            style = (str(m.get("base_url", "")).rstrip("/"), m["model"])
+            alt = style in _own_alt_style
             try:
-                out = self._post(body, timeout=30)
+                out = self._post(self._limits(body, alt), timeout=30)
             except urllib.error.HTTPError as e:
-                if e.code != 400:
+                if e.code != 400 or alt:
                     raise
-                # 有些新模型不收 temperature、或者要用 max_completion_tokens（Claude、OpenAI 的推理模型）：去掉再试一次
-                body.pop("temperature")
-                body["max_completion_tokens"] = max(400, body.pop("max_tokens"))
-                out = self._post(body, timeout=30)
-            return out["choices"][0]["message"]["content"].strip(), None
+                # 400 多半是不认 temperature / max_tokens：换另一种写法再试一次，成了就记住，以后直接用
+                out = self._post(self._limits(body, True), timeout=30)
+                _own_alt_style.add(style)
+            content = _own_content(out)
+            if not content:
+                return None, OWN_EMPTY          # 带思考的模型把长度上限用在思考上了，或者这个模型不适合干这个
+            return content, None
         except urllib.error.HTTPError as e:
-            return None, {401: "自带模型：密钥不对", 403: "自带模型：没有权限", 404: "自带模型：地址或模型名不对",
-                          429: "自带模型：请求太频繁或额度用完"}.get(e.code, "自带模型出错 %d" % e.code)
+            reason = {401: "自带模型：密钥不对", 403: "自带模型：没有权限", 404: "自带模型：地址或模型名不对",
+                      429: "自带模型：请求太频繁或额度用完"}.get(e.code, "自带模型出错 %d" % e.code)
+            detail = ""
+            if e.code not in (401, 403):        # 密钥 / 权限类的报错最容易把密钥带出来，而且原因已经说清楚了
+                try:
+                    detail = own_error_detail(e.read(), str(m.get("api_key") or ""))
+                except Exception:
+                    pass
+            return None, reason + ("（%s）" % detail if detail else "")
         except Exception:
             return None, "连不上自带模型"
 
@@ -566,8 +785,35 @@ class Relay:
 
 
 # ---------------------------------------------------------------------------
-# 自动粘贴（可选）：只模拟一次 Ctrl+V，不替你按回车
+# 积压保护：聊天刷得比翻译快（主城频道、团队里刷屏）时，排着队等翻的越积越多，译文会越来越滞后。
+# 轮到某一条时，如果等翻的超过 12 条、或者它自己已经等了超过 8 秒，就不翻了，只显示原文（也不扣额度）。
 # ---------------------------------------------------------------------------
+
+BACKLOG_MAX, BACKLOG_SECONDS = 12, 8.0
+
+
+def backlog_skip(waiting, waited):
+    """waiting：算上这一条，还有几条在等翻；waited：这一条等了几秒。返回 True = 不翻了。"""
+    return waiting > BACKLOG_MAX or waited > BACKLOG_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# 自动粘贴：只模拟一次 Ctrl+V，不替你按回车
+# ---------------------------------------------------------------------------
+
+PASTE_MAX_WAIT = 6.0        # 按下 Ctrl+T 超过这么久译文才回来：你多半已经在干别的了，只复制、不替你按键
+
+
+def outgoing_action(seq, latest, waited, translated):
+    """Ctrl+T 的译文回来以后怎么办。seq：这次的序号；latest：最新一次 Ctrl+T 的序号；waited：从按下到现在几秒。
+    drop = 你后来又按了一次，这次作废（不复制、不粘贴，免得旧的一句盖掉剪贴板或贴两遍）；fail = 没翻出来；
+    copy = 太慢了，只复制；paste = 复制并替你按 Ctrl+V。"""
+    if seq != latest:
+        return "drop"
+    if not translated:
+        return "fail"
+    return "copy" if waited > PASTE_MAX_WAIT else "paste"
+
 
 ULONG_PTR = ctypes.c_size_t
 
@@ -632,7 +878,12 @@ class Overlay:
         self.cfg = cfg
         self.relay = Relay(cfg)
         self.recent = RecentChat()       # 队伍类频道刚才的几句，翻下一句时当前文
-        self.frames = queue.Queue()      # 抓屏线程 -> 翻译线程
+        self.frames = queue.Queue()      # 抓屏线程 -> 分发线程（分发线程不做慢事，这里不会积压）
+        self.chats = queue.Queue()       # 分发线程 -> 翻译线程：收到的聊天，按到达顺序
+        self.chat_waiting = 0            # chats 里还有几条是要翻的（积压保护看这个数）
+        self.chat_lock = threading.Lock()
+        self.q_seq = 0                   # Ctrl+T 的序号：只有最新一次的译文才复制 / 粘贴。只有分发线程改它
+        self.lost_watch = LostWatch()
         self.ui = queue.Queue()          # 各线程 -> 界面
         self.capture = CaptureThread(cfg, self.frames)
         self.game_seen = False
@@ -641,6 +892,7 @@ class Overlay:
         self.account_win = None
         self.no_balance_told = False
         self.dock = cfg.get("dock_rect")         # [显示?, 左, 上, 宽, 高]，相对游戏窗口，物理像素
+        self.layout_saved = self._layout_key()   # 上次存盘时的窗口位置：没变就不重复写配置文件
         self.docked = None
         self.placed = None
         self.game_gone_since = None
@@ -708,7 +960,8 @@ class Overlay:
 
         self._set_mode(bool(cfg.get("dock", True)))
         self.capture.start()
-        threading.Thread(target=self._translate_loop, daemon=True).start()
+        threading.Thread(target=self._dispatch_loop, daemon=True).start()
+        threading.Thread(target=self._chat_loop, daemon=True).start()
         threading.Thread(target=self._health_loop, daemon=True).start()
         self.per_line = None
         threading.Thread(target=lambda: setattr(self, "per_line", self.relay.per_line()), daemon=True).start()
@@ -759,8 +1012,26 @@ class Overlay:
         hwnd = self.capture.hwnd
         return bool(hwnd) and user32.GetForegroundWindow() == hwnd and not user32.IsIconic(hwnd)
 
+    def _later(self, ms, fn):
+        """界面上的定时循环用它排下一次。窗口已经销毁（正在退出）时 after 会报错，那就不排了。"""
+        try:
+            self.root.after(ms, fn)
+        except (tk.TclError, RuntimeError):
+            pass
+
     def _place(self):
-        """贴合模式下每 0.1 秒对一次位置：跟着游戏窗口和翻译页走，不该出现时藏起来。"""
+        """贴合模式下每 0.1 秒对一次位置。这一轮出什么错都要排下一轮，不然翻译页从此不跟着游戏窗口走、也不会自己退出。"""
+        again = True
+        try:
+            again = self._place_step()
+        except Exception:
+            log_error("对位置")
+        finally:
+            if again:
+                self._later(100, self._place)
+
+    def _place_step(self):
+        """跟着游戏窗口和翻译页走，不该出现时藏起来。返回 False = 程序退出了，别再排下一轮。"""
         if self.docked:
             origin = self.capture.origin
             want = None
@@ -811,8 +1082,8 @@ class Overlay:
             self.game_gone_since = self.game_gone_since or time.time()
             if time.time() - self.game_gone_since > 60:
                 self.root.destroy()
-                return
-        self.root.after(100, self._place)
+                return False
+        return True
 
     # --- 独立模式的拖动与缩放 ---
     def _drag_start(self, e):
@@ -828,19 +1099,27 @@ class Overlay:
         x0, y0, w0, h0 = self._resize
         self.root.geometry("%dx%d" % (max(320 * self.k, w0 + e.x_root - x0), max(180 * self.k, h0 + e.y_root - y0)))
 
+    def _layout_key(self):
+        return json.dumps([self.cfg.get("geometry"), self.cfg.get("dock_rect")])
+
     def _remember_geometry(self):
         if not self.docked:
             self.cfg["geometry"] = self.root.geometry()
+        key = self._layout_key()
+        if key == self.layout_saved:
+            return                      # 插件每次报翻译页位置都会走到这里，没变就不写盘
         try:
-            save_config(self.cfg)
+            # 只存自己管的这两个键：启动器可能刚改过设备编号、自带模型，整份写回会把它们盖回本进程启动时的旧值
+            save_config(self.cfg, only=("geometry", "dock_rect"))
+            self.layout_saved = key
         except OSError:
             pass
 
     # --- 后台线程 ---
-    def _translate_outgoing(self, text):
-        """游戏聊天框里按 Ctrl+T 发来的中文：翻成英文交给界面线程。"""
+    def _translate_outgoing(self, text, seq, started):
+        """游戏聊天框里按 Ctrl+T 发来的中文：翻成英文交给界面线程。seq / started：这次 Ctrl+T 的序号和按下的时间，
+        界面线程拿它们判断这份译文还要不要（见 outgoing_action）。"""
         if has_cjk(text):
-            import i18n
             english, err = self.relay.translate(i18n.to_hans(text), "zh2en",   # 繁体先转简体：服务器的黑话表只认简体
                                                 self.recent.latest())
         else:
@@ -850,56 +1129,97 @@ class Overlay:
             for mark in re.findall(r"\{\d+\}", text):
                 if mark not in english:
                     english = english.rstrip() + " " + mark
-        self.ui.put(("sent", english, err))
+        self.ui.put(("sent", english, err, seq, started))
 
-    def _translate_loop(self):
+    def _dispatch_loop(self):
+        """分发线程：从抓屏线程取帧，分给界面 / 翻译线程。这里不能做任何慢事（联网、翻译）：你按 Ctrl+T 要发的话、
+        翻译页位置、滚轮都从这里过，以前和「翻译收到的聊天」排在同一个循环里，聊天一多它们就得等。"""
         while True:
             payload = self.frames.get()
-            parts = payload.decode("utf-8", errors="ignore").split("\t", 2)
-            if len(parts) < 3:
-                continue
-            code, sender, text = parts
-            if code == "~":
-                self.ui.put(("lost", int(sender or 0)))
-            elif code == "@":
-                self.ui.put(("hello", sender, text))
-            elif code == "!":
-                self.ui.put(("secret", sender))
-            elif code == "W":
-                self.ui.put(("dock", sender))
-            elif code == "A":
-                self.ui.put(("account",))
-            elif code == "V":
-                try:
-                    self.ui.put(("scroll", int(sender)))
-                except ValueError:
-                    pass
-            elif code == "U":
-                self.ui.put(("usage_mode", sender != "0"))
-            elif code == "K":
-                threading.Thread(target=lambda c=text: self.ui.put(("redeemed",) + self.relay.redeem(c)),
-                                 daemon=True).start()
-            elif code == "Q":
-                # 游戏聊天框里发来的中文：单独开线程，不排在收消息的翻译后面
-                threading.Thread(target=self._translate_outgoing, args=(text,), daemon=True).start()
-            elif is_addon_spam(text):
-                continue                                  # 插件自动播报：游戏聊天框里本来就有，翻译页不重复显示
-            elif needs_translation(text):
-                context = self.recent.before(code, sender)
-                self.recent.add(code, sender, text)
-                translated, err = self.relay.translate(text, "en2zh", context)
-                self.ui.put(("chat", code, sender, text, translated, err))
-            else:
-                self.recent.add(code, sender, text)
-                self.ui.put(("chat", code, sender, text, None, None))
+            try:
+                self._dispatch(payload)
+            except Exception:
+                log_error("分发")            # 一帧坏数据不能让整个线程停掉
+
+    def _dispatch(self, payload):
+        parts = payload.decode("utf-8", errors="ignore").split("\t", 2)
+        if len(parts) < 3:
+            return
+        code, sender, text = parts
+        if code == "~":
+            self.ui.put(("lost", int(sender or 0), text == "1"))
+        elif code == "@":
+            self.ui.put(("hello", sender, text))
+        elif code == "!":
+            self.ui.put(("secret", sender))
+        elif code == "W":
+            self.ui.put(("dock", sender))
+        elif code == "A":
+            self.ui.put(("account",))
+        elif code == "V":
+            try:
+                self.ui.put(("scroll", int(sender)))
+            except ValueError:
+                pass
+        elif code == "U":
+            self.ui.put(("usage_mode", sender != "0"))
+        elif code == "K":
+            threading.Thread(target=lambda c=text: self.ui.put(("redeemed",) + self.relay.redeem(c)),
+                             daemon=True).start()
+        elif code == "Q":
+            # 游戏聊天框里发来的中文：单独开线程，不排在收消息的翻译后面
+            self.q_seq += 1
+            threading.Thread(target=self._translate_outgoing, args=(text, self.q_seq, time.monotonic()),
+                             daemon=True).start()
+        elif is_addon_spam(text):
+            return                                    # 插件自动播报：游戏聊天框里本来就有，翻译页不重复显示
+        else:
+            # 收到的聊天。前文在这里处理（这里是按到达顺序的）：先取这一句之前的前文，再把这一句记进去。
+            # 不翻的也走同一个队列，翻译页里才能保持到达顺序。
+            need = needs_translation(text)
+            context = self.recent.before(code, sender) if need else None
+            self.recent.add(code, sender, text)
+            if need:
+                with self.chat_lock:
+                    self.chat_waiting += 1
+            self.chats.put((time.monotonic(), code, sender, text, need, context))
+
+    def _chat_loop(self):
+        """翻译线程：一条一条翻收到的聊天。只有这一个线程，所以翻译页里的顺序就是到达顺序。"""
+        while True:
+            arrived, code, sender, text, need, context = self.chats.get()
+            translated = err = None
+            try:
+                if need:
+                    with self.chat_lock:
+                        waiting = self.chat_waiting
+                        self.chat_waiting -= 1
+                    if not backlog_skip(waiting, time.monotonic() - arrived):
+                        translated, err = self.relay.translate(text, "en2zh", context)
+            except Exception:
+                log_error("翻译")
+            self.ui.put(("chat", code, sender, text, translated, err))
 
     def _health_loop(self):
+        checked = 0.0
         while True:
-            self.relay_ok = self.relay.healthy()
+            try:
+                self.relay_ok = self.relay.healthy()
+                # 额度用完以后 translate 不再去请求，自己发现不了「已经充上了」（比如在别的电脑、网页上充的）：
+                # 每分钟查一次账户，Relay.account 会更新余额和 no_balance，到账了就在翻译页说一声
+                if self.relay.no_balance and not self.relay.own and time.monotonic() - checked >= 60:
+                    checked = time.monotonic()
+                    self.relay.account()
+                    if not self.relay.no_balance:
+                        self.ui.put(("balance_back",))
+            except Exception:
+                log_error("查服务状态")
             time.sleep(20)
 
     # --- 界面更新 ---
     def _append(self, pieces):
+        """往翻译页加一条。pieces：[(文字, 标签), …]。别人说的话 / 译文 / 名字的标签里要带 RAW（见文件开头），
+        程序自己的提示不带。"""
         at_bottom = self.log.yview()[1] >= 0.999
         self.log.configure(state="normal")
         # 换行放在每条前面而不是后面，免得底部总留一行空白
@@ -931,98 +1251,120 @@ class Overlay:
         self.placed = "?"        # 强制 _place 重新算一次：该藏就藏，该挪就挪
 
     def _pump(self):
+        """把各线程放进 self.ui 的结果画到界面上，每 50 毫秒一轮。每一项单独兜错：以前任何一项出错都会跳过
+        最后的重新排期，翻译页从此不再更新。"""
         try:
             while True:
-                item = self.ui.get_nowait()
-                kind = item[0]
-                if kind != "dock":
-                    self.game_seen = True
-                if kind == "chat":
-                    _, code, sender, text, translated, err = item
-                    label, _ = CHANNELS.get(code, ("?", FG))
-                    name_tag = "name"
-                    if "\x1f" in sender:              # 插件带来了职业颜色：名字 \x1f rrggbb
-                        sender, hexcolor = sender.split("\x1f", 1)
-                        if len(hexcolor) == 6 and all(c in "0123456789abcdefABCDEF" for c in hexcolor):
-                            name_tag = "cls" + hexcolor.lower()
-                            self.log.tag_configure(name_tag, foreground="#" + hexcolor.lower())
-                    st = self.stats
-                    st["chat"] += 1
-                    st["last_chat"] = int(time.time())
-                    st["chan"][code] = st["chan"].get(code, 0) + 1
-                    if translated:
-                        st["tr"] += 1
-                    elif err:
-                        st["err"] += 1
-                        st["errs"][err[:20]] = st["errs"].get(err[:20], 0) + 1
-                        if err == NO_BALANCE:
-                            st["nobal"] += 1
-                    pieces = [("[%s] " % label, "ch" + code), (sender, name_tag), (": ", "name")]
-                    if translated:
-                        pieces.append((translated + "\n", ()))
-                        if self.cfg.get("show_original", True):
-                            pieces.append((text + "\n", "orig"))
-                    else:
-                        pieces.append((text + "\n", ()))
-                        if err and err != NO_BALANCE:
-                            pieces.append(("（没翻出来：%s）\n" % err, "warn"))
-                    self._append(pieces)
-                    if err == NO_BALANCE:
-                        self._tell_no_balance()
-                elif kind == "hello":
-                    # 插件登录、过加载画面时会连着打好几次招呼；同一个角色和版本只提示一次
-                    self.stats["addon_ver"] = str(item[1])[:12]
-                    hello = (item[2], item[1])
-                    if hello != getattr(self, "last_hello", None):
-                        self.last_hello = hello
-                        self._append([("已连上游戏，角色 %s，插件 v%s" % (item[2], item[1]), "note")])
-                        self._tell_update()
-                elif kind == "lost":
-                    self.stats["lost"] += item[1]
-                    if time.time() - getattr(self, "last_lost_note", 0) > 30:     # 30 秒最多提示一次
-                        self.last_lost_note = time.time()
-                        self._append([("（有 %d 条聊天没读到：游戏画面左上角被别的窗口挡住、游戏最小化或卡顿时会漏。）"
-                                       % item[1], "warn")])
-                elif kind == "secret":
-                    self.stats["secret"] += 1
-                    label, _ = CHANNELS.get(item[1], ("?", FG))
-                    self._append([("[%s] 有新消息，但游戏在副本限制期间不让插件读取内容。" % label, "note")])
-                elif kind == "dock":
-                    self.game_seen = True
-                    self._on_dock(item[1])
-                elif kind == "usage":
-                    self._show_usage(item[1], item[2])
-                elif kind == "scroll":
-                    view = self.usage_view if self.usage_on else self.log
-                    view.yview_scroll(-3 * item[1], "units")
-                elif kind == "usage_mode":
-                    self._set_usage_mode(item[1])
-                elif kind == "account":
-                    self._open_account()
-                elif kind == "account_info":
-                    self._account_refresh(item[1])
-                elif kind == "redeemed":
-                    self._account_redeemed(item[1], item[2])
-                elif kind == "sent":
-                    _, english, err = item
-                    if not english:
-                        if err == NO_BALANCE:
-                            self._tell_no_balance()
-                        else:
-                            self._append([("你这句没翻出来：%s" % err, "warn")])
-                        continue
-                    self.root.clipboard_clear()
-                    self.root.clipboard_append(english)
-                    self.root.update()
-                    # 自动粘贴常开：只要游戏在前台，就替你按一次 Ctrl+V
-                    if self._paste_target_ok():
-                        self._append([("→ ", "out"), (english, "out"), ("  已粘贴，按回车发送", "note")])
-                        self._auto_paste(0)
-                    else:
-                        self._append([("→ ", "out"), (english, "out"), ("  游戏不在前台，已复制，回游戏按 Ctrl+V", "note")])
-        except queue.Empty:
-            pass
-        self.root.after(50, self._pump)
+                try:
+                    item = self.ui.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self._handle(item)
+                except Exception:
+                    log_error("界面更新")
+        finally:
+            self._later(50, self._pump)
+
+    def _handle(self, item):
+        kind = item[0]
+        if kind != "dock":
+            self.game_seen = True
+        if kind == "chat":
+            _, code, sender, text, translated, err = item
+            label, _ = CHANNELS.get(code, ("?", FG))
+            name_tag = "name"
+            if "\x1f" in sender:              # 插件带来了职业颜色：名字 \x1f rrggbb
+                sender, hexcolor = sender.split("\x1f", 1)
+                if len(hexcolor) == 6 and all(c in "0123456789abcdefABCDEF" for c in hexcolor):
+                    name_tag = "cls" + hexcolor.lower()
+                    self.log.tag_configure(name_tag, foreground="#" + hexcolor.lower())
+            st = self.stats
+            st["chat"] += 1
+            st["last_chat"] = int(time.time())
+            st["chan"][code] = st["chan"].get(code, 0) + 1
+            if translated:
+                st["tr"] += 1
+            elif err:
+                st["err"] += 1
+                reason = err.split("（")[0][:20]           # 括号里是自带模型返回的报错原文，不进统计
+                st["errs"][reason] = st["errs"].get(reason, 0) + 1
+                if err == NO_BALANCE:
+                    st["nobal"] += 1
+            # 频道名是程序自己的字（繁体模式要换成台服叫法）；名字、译文、原话是别人的，带 RAW 原样显示
+            pieces = [("[%s] " % label, "ch" + code), (sender, (name_tag, RAW)), (": ", "name")]
+            if translated:
+                pieces.append((translated + "\n", (RAW,)))        # 译文：服务器 / 模型在繁体模式下已经按台服说法出繁体
+                if self.cfg.get("show_original", True):
+                    pieces.append((text + "\n", ("orig", RAW)))
+            else:
+                pieces.append((chat_glyph(text) + "\n", (RAW,)))  # 没翻的（队友的中文原话等）：只转字形
+                if err and err != NO_BALANCE:
+                    pieces.append(("（没翻出来：%s）\n" % err, "warn"))
+            self._append(pieces)
+            if err == NO_BALANCE:
+                self._tell_no_balance()
+        elif kind == "hello":
+            # 插件登录、过加载画面时会连着打好几次招呼；同一个角色和版本只提示一次
+            self.stats["addon_ver"] = str(item[1])[:12]
+            hello = (item[2], item[1])
+            if hello != getattr(self, "last_hello", None):
+                self.last_hello = hello
+                self._append([("已连上游戏，角色 ", "note"), (item[2], ("note", RAW)),
+                              ("，插件 v%s" % item[1], "note")])
+                self._tell_update()
+        elif kind == "lost":
+            self.stats["lost"] += item[1]
+            # 不再每次漏读都提示（见 LostWatch）。再确认一下此刻游戏确实在前台，免得刚切走时冒出来
+            if self.lost_watch.feed(bool(item[2]) and self._game_in_front(), time.monotonic()):
+                self._append([("游戏左上角好像被挡住了，有消息没读到。", "note")])
+        elif kind == "secret":
+            self.stats["secret"] += 1
+            label, _ = CHANNELS.get(item[1], ("?", FG))
+            self._append([("[%s] 有新消息，但游戏在副本限制期间不让插件读取内容。" % label, "note")])
+        elif kind == "dock":
+            self.game_seen = True
+            self._on_dock(item[1])
+        elif kind == "usage":
+            self._show_usage(item[1], item[2])
+        elif kind == "scroll":
+            view = self.usage_view if self.usage_on else self.log
+            view.yview_scroll(-3 * item[1], "units")
+        elif kind == "usage_mode":
+            self._set_usage_mode(item[1])
+        elif kind == "account":
+            self._open_account()
+        elif kind == "account_info":
+            self._account_refresh(item[1])
+        elif kind == "redeemed":
+            self._account_redeemed(item[1], item[2])
+        elif kind == "balance_back":
+            self.no_balance_told = False          # 以后再用完还要再提醒一次
+            self._append([("额度到账了，继续翻译", "note")])
+        elif kind == "sent":
+            _, english, err, seq, started = item
+            action = outgoing_action(seq, self.q_seq, time.monotonic() - started, bool(english))
+            if action == "drop":
+                return
+            if action == "fail":
+                if err == NO_BALANCE:
+                    self._tell_no_balance()
+                else:
+                    self._append([("你这句没翻出来：%s" % err, "warn")])
+                return
+            self.root.clipboard_clear()
+            self.root.clipboard_append(english)
+            self.root.update()
+            if action == "copy":
+                self._show_sent(english, "翻得有点慢，已复制，按 Ctrl+V 贴上")
+            elif self._paste_target_ok():
+                self._auto_paste(0, seq, english)     # 游戏在前台：等你松开 Ctrl+T，替你按一次 Ctrl+V
+            else:
+                self._show_sent(english, "游戏不在前台，已复制，回游戏按 Ctrl+V")
+
+    def _show_sent(self, english, note):
+        """翻译页里记一行你发的话：→ 英文  后面跟一句现在该怎么办。"""
+        self._append([("→ ", "out"), (english, ("out", RAW)), ("  " + note, "note")])
 
     # --- 账户窗口：余额、充值、设备编号。收费相关的东西只出现在这里，不进游戏 ---
     def _tell_update(self, repeat=False):
@@ -1032,10 +1374,10 @@ class Overlay:
         if not latest or (repeat and not too_old):
             return
         if too_old:
-            self._append([("这个版本太旧了，可能有功能不正常：请打开电脑上的「魔兽聊天翻译」点「立即更新」", "warn")])
             if repeat or not getattr(self, "old_timer", False):      # 只留一条定时，别每次连上游戏都多挂一条
                 self.old_timer = True
-                self.root.after(30 * 60 * 1000, lambda: self._tell_update(repeat=True))
+                self._later(30 * 60 * 1000, lambda: self._tell_update(repeat=True))   # 先排下一次：下面写提示出错也不会断
+            self._append([("这个版本太旧了，可能有功能不正常：请打开电脑上的「魔兽聊天翻译」点「立即更新」", "warn")])
         elif not getattr(self, "told_update", False):
             self.told_update = True
             self._append([("有新版本 %s：打开电脑上的「魔兽聊天翻译」点「立即更新」" % latest, "note")])
@@ -1153,7 +1495,7 @@ class Overlay:
             self.acc_msg.configure(text="设备编号格式不对：应该是 d_ 开头加 32 位字母数字", fg="#ff7070")
             return
         self.cfg["device_id"] = new
-        save_config(self.cfg)
+        save_config(self.cfg, only=("device_id",))      # 只存这一个键，别把启动器刚改的别的设置盖回去
         self.relay.balance, self.relay.no_balance, self.no_balance_told = None, False, False
         self.acc_msg.configure(text="已换成这个编号", fg="#4cd964")
         self._account_refresh(None)
@@ -1288,15 +1630,33 @@ class Overlay:
             return buf.value == "fake game"
         return bool(self.capture.hwnd) and front == self.capture.hwnd
 
-    def _auto_paste(self, tries):
-        """等你松开 Ctrl+T 后替你按一次 Ctrl+V。"""
-        if keys_held() and tries < 40:
-            self.root.after(25, lambda: self._auto_paste(tries + 1))
+    def _auto_paste(self, tries, seq, english):
+        """等你松开 Ctrl+T 后替你按一次 Ctrl+V，并在翻译页记一行结果。最多等 1 秒。"""
+        if seq != self.q_seq:
+            return                      # 等松键的这会儿你又按了一次 Ctrl+T：这句不贴了，等新的那句
+        if keys_held():
+            if tries < 40:
+                self.root.after(25, lambda: self._auto_paste(tries + 1, seq, english))
+            else:
+                # 还按着 Ctrl / Shift / Alt 就替你按 Ctrl+V，游戏收到的会是别的组合键（比如 Ctrl+Shift+V），不能按
+                self._show_sent(english, "已复制，松开按键后按 Ctrl+V")
             return
         if self._paste_target_ok():
             press_ctrl_v()
+            self._show_sent(english, "已粘贴，按回车发送")
+        else:
+            self._show_sent(english, "游戏不在前台，已复制，回游戏按 Ctrl+V")
 
     def _refresh_status(self):
+        """每秒刷新一次状态栏。和 _place 一样：这一轮出错也要排下一轮。"""
+        try:
+            self._refresh_status_step()
+        except Exception:
+            log_error("状态栏")
+        finally:
+            self._later(1000, self._refresh_status)
+
+    def _refresh_status_step(self):
         parts, color = [], "#4cd964"
         if not self.capture.window_ok:
             parts.append("没找到游戏窗口")
@@ -1321,7 +1681,6 @@ class Overlay:
                 self._append([("翻译服务连不上，暂时只显示原文。", "warn") if not self.relay_ok
                               else ("翻译服务恢复了。", "note")])
             self.relay_reported = self.relay_ok
-        self.root.after(1000, self._refresh_status)
 
     def _write_status(self):
         """把连接状态写给启动器（反馈诊断、匿名连接统计都从这里来）。"""
@@ -1345,6 +1704,37 @@ class Overlay:
         self.root.mainloop()
 
 
+OVERLAY_MUTEX = "Local\\WoWChatTranslatorOverlay"
+_instance_mutex = None          # 留着句柄：进程活着互斥量就在，进程一结束（包括被启动器 terminate）系统自动收回
+
+
+def already_running(wait=2.0):
+    """翻译窗口进程只能有一个：两个同时跑会各读一遍色块，每条聊天翻两遍（扣两次额度），Ctrl+T 贴两遍。
+    用一个命名互斥量占位。启动器重启翻译时是先杀旧的再起新的，旧进程可能还没退干净，所以发现已经有了先等一会儿
+    再认定。互斥量建不出来（极少见）就照常启动，宁可多开也别打不开。"""
+    global _instance_mutex
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = wt.HANDLE
+        k32.CreateMutexW.argtypes = [ctypes.c_void_p, wt.BOOL, wt.LPCWSTR]
+        k32.CloseHandle.argtypes = [wt.HANDLE]
+        deadline = time.monotonic() + wait
+        while True:
+            ctypes.set_last_error(0)
+            handle = k32.CreateMutexW(None, False, OVERLAY_MUTEX)
+            if not handle:
+                return False
+            if ctypes.get_last_error() != 183:          # 183 = ERROR_ALREADY_EXISTS
+                _instance_mutex = handle
+                return False
+            k32.CloseHandle(handle)                      # 必须关掉：自己攥着这个句柄，旧进程退了互斥量也不会消失
+            if time.monotonic() >= deadline:
+                return True
+            time.sleep(0.2)
+    except Exception:
+        return False
+
+
 def main():
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -1353,8 +1743,9 @@ def main():
     cfg = load_config()
     if not os.path.exists(CONFIG_PATH):
         save_config(cfg)
-    import i18n
-    i18n.set_mode(cfg.get("lang", "auto"))         # 繁体模式：界面文字和译文都在 Tk 这一层转成繁体
+    if not cfg.get("capture_origin") and already_running():     # 调试模式（读固定位置、没有真游戏）不限，方便和正式的并排跑
+        return
+    i18n.set_mode(cfg.get("lang", "auto"))         # 繁体模式：程序自己的界面文字在 Tk 这一层转成繁体；聊天内容不转（见 RAW）
     i18n.install_tk_hook()
     Overlay(cfg).run()
 
