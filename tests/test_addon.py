@@ -647,22 +647,26 @@ def main():
     pump(1.0)
     assert last_w() == b"W\t1,236,743,450,207,207,18\t", last_w()
 
-    # 10) 官网「上次买的兑换码」：只有请求成功且服务器说已兑换才记成已用，临时错误照常显示
-    with open(os.path.join(ROOT, "site", "index.html"), encoding="utf-8") as f:
-        page = f.read()
-    assert "!j.code" not in page, "不带 code 的响应（502、429）不能当成已兑换"
-    assert "return r.ok ? r.json() : null;" in page and "if (j && j.used) {" in page
+    # 下面两条查的是官网文件。官网不进开源仓库（那边的自动构建也跑这个测试），所以文件在才查。
+    index_html = os.path.join(ROOT, "site", "index.html")
+    if os.path.exists(index_html):
+        # 10) 官网「上次买的兑换码」：只有请求成功且服务器说已兑换才记成已用，临时错误照常显示
+        with open(index_html, encoding="utf-8") as f:
+            page = f.read()
+        assert "!j.code" not in page, "不带 code 的响应（502、429）不能当成已兑换"
+        assert "return r.ok ? r.json() : null;" in page and "if (j && j.used) {" in page
 
-    # 11) 繁体页的人机验证组件用繁体
-    sys.path.insert(0, os.path.join(ROOT, "tools"))
-    import build_hant
-    import i18n
-    mode, i18n._mode = i18n._mode, "hant"
-    try:
-        hant = build_hant.to_hant_page("<script>turnstile.render('#captcha', {sitekey: K, language: 'zh-cn',});</script>", "trial.html")
-    finally:
-        i18n._mode = mode
-    assert "language: 'zh-tw'" in hant and "zh-cn" not in hant, hant
+    if os.path.exists(os.path.join(ROOT, "tools", "build_hant.py")) and os.path.isdir(os.path.join(ROOT, "site", "guide")):
+        # 11) 繁体页的人机验证组件用繁体
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import build_hant
+        import i18n
+        mode, i18n._mode = i18n._mode, "hant"
+        try:
+            hant = build_hant.to_hant_page("<script>turnstile.render('#captcha', {sitekey: K, language: 'zh-cn',});</script>", "trial.html")
+        finally:
+            i18n._mode = mode
+        assert "language: 'zh-tw'" in hant and "zh-cn" not in hant, hant
 
     print("addon tests passed:", len(seen), "frames decoded")
 
