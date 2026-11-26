@@ -34,7 +34,7 @@ Windows 程序 `app/` 读这条色块的像素、解码出聊天、翻译后把�
 ```
 python app/main.py              # 启动器
 python app/main.py --overlay    # 只跑翻译
-pip install pyinstaller pillow
+pip install pyinstaller pillow opencc
 python build.py                 # 打包，产物在 dist/
 ```
 

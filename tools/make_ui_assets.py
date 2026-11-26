@@ -43,11 +43,13 @@ def hero(scale):
 def main():
     os.makedirs(OUT, exist_ok=True)
     icon = Image.open(os.path.join(ROOT, "assets", "icon.png")).convert("RGBA")
+    icon_hant = Image.open(os.path.join(ROOT, "assets", "icon_hant.png")).convert("RGBA")      # 繁体界面用「譯」
     for pct in SCALES:
         s = pct / 100
         hero(s).save(os.path.join(OUT, "hero_%d.png" % pct), optimize=True)
         n = int(LOGO * s)
         icon.resize((n, n), Image.LANCZOS).save(os.path.join(OUT, "logo_%d.png" % pct), optimize=True)
+        icon_hant.resize((n, n), Image.LANCZOS).save(os.path.join(OUT, "logo_hant_%d.png" % pct), optimize=True)
     total = sum(os.path.getsize(os.path.join(OUT, f)) for f in os.listdir(OUT))
     print("ui assets:", len(os.listdir(OUT)), "files", total // 1024, "KB")
 

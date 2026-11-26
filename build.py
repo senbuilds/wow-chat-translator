@@ -69,8 +69,10 @@ def main():
         "--paths", os.path.join(ROOT, "app"),
         "--hidden-import", "app", "--hidden-import", "launcher", "--hidden-import", "codec",
         "--hidden-import", "version", "--hidden-import", "fingerprint",
+        "--hidden-import", "i18n", "--collect-all", "opencc",          # 简体 / 繁体转换（OpenCC 带字典）
         "--add-data", os.path.join(ROOT, "addon", "ChatBridge") + os.pathsep + os.path.join("addon", "ChatBridge"),
         "--add-data", ICON + os.pathsep + "assets",
+        "--add-data", ICON.replace("icon.ico", "icon_hant.ico") + os.pathsep + "assets",       # 繁体界面的「譯」图标
         "--add-data", os.path.join(ROOT, "assets", "ui") + os.pathsep + os.path.join("assets", "ui"),
         "--distpath", DIST, "--workpath", WORK, "--specpath", WORK,
         os.path.join(ROOT, "app", "main.py"))
@@ -89,7 +91,9 @@ def main():
         "--name", "WoWTranslatorSetup", "--onefile", "--noconsole", "--icon", ICON,
         "--version-file", version_file("WoWTranslatorSetup", "ChatBridge Translator Setup"),
         "--paths", os.path.join(ROOT, "app"), "--hidden-import", "version",
+        "--hidden-import", "i18n", "--collect-all", "opencc",
         "--add-data", payload + os.pathsep + ".", "--add-data", ICON + os.pathsep + ".",
+        "--add-data", ICON.replace("icon.ico", "icon_hant.ico") + os.pathsep + ".",
         "--distpath", DIST, "--workpath", WORK, "--specpath", WORK,
         os.path.join(ROOT, "installer", "setup.py"))
     final = os.path.join(DIST, SETUP_NAME)

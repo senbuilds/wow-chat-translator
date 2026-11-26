@@ -1,9 +1,13 @@
 ## Interface: 16001
 ## Title: ChatBridge
 ## Title-zhCN: ChatBridge 聊天翻译桥
+## Title-zhTW: ChatBridge 聊天翻譯橋
 ## Notes: Shows incoming chat as a small colour strip that the companion translator app reads.
 ## Notes-zhCN: 把收到的聊天显示成屏幕左上角的小色块，供游戏外的翻译小程序读取。
-## Version: 2.7
+## Notes-zhTW: 把收到的聊天顯示成螢幕左上角的小色塊，供遊戲外的翻譯程式讀取。
+## Version: 2.8
 ## SavedVariables: ChatBridgeDB
 
+ChatBridge_Lang.lua
+ChatBridge_Hant.lua
 ChatBridge.lua

@@ -58,12 +58,20 @@ def powershell(script):
 def make_shortcuts(target_dir):
     """桌面和开始菜单各建一个快捷方式。桌面可能被 OneDrive 接管，所以让系统自己报路径。"""
     exe = os.path.join(target_dir, EXE)
+    icon = exe
+    try:                                      # 繁体中文的系统：快捷方式用「譯」字图标
+        import i18n
+        hant_icon = os.path.join(target_dir, "_internal", "assets", "icon_hant.ico")
+        if i18n.mode() == "hant" and os.path.exists(hant_icon):
+            icon = hant_icon
+    except Exception:
+        pass
     script = (
         "$w = New-Object -ComObject WScript.Shell; "
         "foreach ($d in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) { "
         "$s = $w.CreateShortcut((Join-Path $d '%s.lnk')); $s.TargetPath = '%s'; $s.WorkingDirectory = '%s'; "
         "$s.IconLocation = '%s,0'; $s.Description = '%s'; $s.Save() }"
-    ) % (APP_NAME, exe, target_dir, exe, APP_NAME)
+    ) % (APP_NAME, exe, target_dir, icon, APP_NAME)
     result = powershell(script)
     return result.returncode == 0, result.stderr.strip()
 
@@ -159,6 +167,14 @@ def install(target_dir, shortcut=True, registry=True, progress=lambda text: None
 
 class Wizard:
     def __init__(self):
+        try:                                      # 繁体中文的系统显示繁体（安装时还没有设置，只看系统语言）
+            import i18n
+            if i18n.set_mode("auto") == "hant":
+                global PRIVACY_URL
+                PRIVACY_URL = "https://wow.husen.ca/hant/privacy.html"
+            i18n.install_tk_hook()
+        except Exception:
+            pass
         root = self.root = tk.Tk()
         root.title(APP_NAME + " 安装")
         try:                                      # 标题栏用深色（Windows 10/11），不支持就算了
@@ -171,7 +187,8 @@ class Wizard:
         root.configure(bg=BG)
         root.resizable(False, False)
         try:
-            root.iconbitmap(resource("icon.ico"))
+            hant = os.path.exists(resource("icon_hant.ico")) and "hant" in PRIVACY_URL       # 繁体系统用「譯」图标
+            root.iconbitmap(resource("icon_hant.ico" if hant else "icon.ico"))
         except tk.TclError:
             pass
         k = max(1.0, root.winfo_fpixels("1i") / 96.0)

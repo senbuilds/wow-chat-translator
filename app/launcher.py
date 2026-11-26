@@ -24,6 +24,7 @@ import urllib.request
 from tkinter import filedialog
 
 import app
+import i18n
 import version
 
 APP_NAME = "魔兽聊天翻译"
@@ -356,11 +357,26 @@ def panel(parent, title):
 # 启动器窗口
 # ---------------------------------------------------------------------------
 
+def icon_name():
+    """窗口 / 任务栏图标：繁体模式用「譯」字的那个。"""
+    name = "icon_hant.ico" if i18n.mode() == "hant" else "icon.ico"
+    return name if os.path.exists(resource("assets", name)) else "icon.ico"
+
+
+def hant_url(url):
+    """服务器给的领取 / 验证链接：繁体模式下换成官网繁体版的同一页。"""
+    if i18n.mode() == "hant" and url.startswith("https://wow.husen.ca/") and not url.startswith("https://wow.husen.ca/hant/"):
+        return "https://wow.husen.ca/hant/" + url[len("https://wow.husen.ca/"):]
+    return url
+
+
 class Launcher:
     def __init__(self):
         self.cfg = app.load_config()
         if not os.path.exists(app.CONFIG_PATH):
             app.save_config(self.cfg)
+        i18n.set_mode(self.cfg.get("lang", "auto"))      # 简体 / 繁体：界面文字在 Tk 这一层统一转换
+        i18n.install_tk_hook()
         self.settings = load_settings()
         self.relay = app.Relay(self.cfg)
         self.proc = None
@@ -373,13 +389,13 @@ class Launcher:
         root.configure(bg=BG)
         root.resizable(False, False)
         try:
-            root.iconbitmap(resource("assets", "icon.ico"))
+            root.iconbitmap(resource("assets", icon_name()))
         except tk.TclError:
             pass
         k = self.k = max(1.0, root.winfo_fpixels("1i") / 96.0)
         pct = min(UI_SCALES, key=lambda v: abs(v - k * 100))
         self.hero_img = tk.PhotoImage(file=resource("assets", "ui", "hero_%d.png" % pct))
-        self.logo_img = tk.PhotoImage(file=resource("assets", "ui", "logo_%d.png" % pct))
+        self.logo_img = tk.PhotoImage(file=resource("assets", "ui", ("logo_hant_%d.png" if i18n.mode() == "hant" else "logo_%d.png") % pct))
         W, HH = self.hero_img.width(), self.hero_img.height()
         P = int(24 * k)                                       # 左右留白
         wrap = W - 2 * P
@@ -470,7 +486,8 @@ class Launcher:
         bar.pack(fill="x", pady=(int(8 * k), int(6 * k)))
         self.update_button = None
         items = (("找回余额", self.open_recover), ("自带模型", self.open_own_model), ("反馈问题", self.open_feedback),
-                 ("检查更新", self.update_action))
+                 ("检查更新", self.update_action),
+                 ("简体中文" if i18n.mode() == "hant" else "繁體中文", self.toggle_lang))
         for n, (label, cmd) in enumerate(items):
             bar.grid_columnconfigure(n * 2, weight=1, uniform="bar")
             link = Link(bar, label, cmd, pady=int(4 * k))
@@ -540,6 +557,7 @@ class Launcher:
         game = self.settings.get("game_dir") or find_game_dir()
         self.set_game_dir(game, self.settings.get("flavor"))
         self.auto_update_addon()
+        self.write_addon_lang()                       # 插件里的文字跟程序的简体 / 繁体一致
         if "--autostart" in sys.argv:                 # 刚自动更新完：更新前在跑翻译，就接着跑
             root.after(800, self.start)
         if self.settings.get("auto_check_update", True):   # 安装时可以关掉；关了就只在点「检查更新」时联网
@@ -562,7 +580,7 @@ class Launcher:
         win.resizable(False, False)
         win.transient(self.root)
         try:
-            win.iconbitmap(resource("assets", "icon.ico"))
+            win.iconbitmap(resource("assets", icon_name()))
         except tk.TclError:
             pass
         win.protocol("WM_DELETE_WINDOW", win.withdraw)
@@ -650,7 +668,7 @@ class Launcher:
         if flavor not in flavors:
             flavor = "_forever_" if "_forever_" in flavors else (flavors[0] if flavors else "")
         self.flavor.set(flavor)
-        self.flavor_label.set(FLAVOR_NAMES.get(flavor, flavor) if flavor else "（没有找到）")
+        self.flavor_label.set(i18n.t(FLAVOR_NAMES.get(flavor, flavor) if flavor else "（没有找到）"))
         if self.game_dir:
             self.dir_label.configure(text=self.game_dir, fg=TEXT)
         else:
@@ -674,7 +692,7 @@ class Launcher:
         self.dir_label.configure(text="%s\n这个文件夹里没有找到魔兽世界，请选 World of Warcraft 文件夹本身。" % chosen, fg=BAD)
 
     def flavor_changed(self):
-        self.flavor_label.set(FLAVOR_NAMES.get(self.flavor.get(), self.flavor.get()))
+        self.flavor_label.set(i18n.t(FLAVOR_NAMES.get(self.flavor.get(), self.flavor.get())))
         self.settings["flavor"] = self.flavor.get()
         save_settings(self.settings)
         self.refresh_addon()
@@ -743,6 +761,7 @@ class Launcher:
             self.addon_label.configure(text="安装失败：%s" % e, fg=BAD)
             self.say("插件安装失败：%s" % e, BAD)
             return
+        self.write_addon_lang()
         self.refresh_addon()
         if first_time:
             self.settings["addon_auto_installed"] = True     # 装过一次（手动或自动），以后就不再自动装
@@ -751,6 +770,43 @@ class Launcher:
         self.addon_label.configure(text=self.addon_label.cget("text") + "\n已装好。游戏开着的话，" + tip + " 才生效。")
         name = FLAVOR_NAMES.get(self.flavor.get(), self.flavor.get())
         self.say("插件已装进%s。游戏开着的话，%s 才生效。" % (name, tip), GOOD)
+
+    def write_addon_lang(self):
+        """把简体 / 繁体的选择写进已装插件的 ChatBridge_Lang.lua，游戏里插件的文字跟程序一致（游戏开着要 /reload）。
+        返回 True 表示文件有改动。"""
+        if not self.game_dir or not self.flavor.get():
+            return False
+        target = os.path.join(addon_dir(self.game_dir, self.flavor.get()), "ChatBridge_Lang.lua")
+        if not os.path.isdir(os.path.dirname(target)):
+            return False
+        text = ('-- 简体 / 繁体：电脑上的启动器装插件时会改写这一行（"hans" 或 "hant"）。nil = 跟游戏客户端语言。\n'
+                'ChatBridgeLang = "%s"\n' % i18n.mode())
+        try:
+            with open(target, encoding="utf-8") as f:
+                if f.read() == text:
+                    return False
+        except OSError:
+            pass
+        try:
+            with open(target, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+            return True
+        except OSError:
+            return False
+
+    def toggle_lang(self):
+        """简体 ↔ 繁体：存进 config，改插件的语言文件，然后重新打开启动器（翻译在跑就接着跑）。"""
+        self.cfg = app.load_config()
+        self.cfg["lang"] = "hans" if i18n.mode() == "hant" else "hant"
+        app.save_config(self.cfg)
+        i18n.set_mode(self.cfg["lang"])
+        self.write_addon_lang()
+        args = [sys.executable] if app.FROZEN else [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")]
+        if self.running():
+            args.append("--autostart")
+        subprocess.Popen(args, close_fds=True)
+        self.stop()
+        self.root.destroy()
 
     # --- 启动和停止 ---
     def overlay_command(self):
@@ -792,7 +848,7 @@ class Launcher:
         elif self.proc is not None:
             self.proc = None
             self.run_hint.configure(text="已停止，下次玩之前再点「启动」")
-        elif not self.run_hint.cget("text") or self.run_hint.cget("text") == "窗口可以最小化，别关":
+        elif not self.run_hint.cget("text") or self.run_hint.cget("text") == i18n.t("窗口可以最小化，别关"):
             self.run_hint.configure(text="每次玩之前点「启动」")
 
     def tick(self):
@@ -938,7 +994,7 @@ class Launcher:
             self.cdk_msg.configure(text="领不了：%s" % err, fg=BAD)
             return
         import webbrowser
-        webbrowser.open(url)
+        webbrowser.open(hant_url(url))
         self.cdk_msg.configure(text="已在浏览器打开领取页面：点一下「确认你是真人」就到账（15 分钟内有效）。", fg=GOLD)
         self.trial_polls = 36                       # 接下来 3 分钟每 5 秒查一次余额，到账了马上显示
         self.root.after(5000, self.poll_trial)
@@ -977,7 +1033,7 @@ class Launcher:
             self.cdk_msg.configure(text="推广码用不了：%s" % err, fg=BAD)
             return
         import webbrowser
-        webbrowser.open(url)
+        webbrowser.open(hant_url(url))
         self.cdk.delete(0, "end")
         self.cdk_msg.configure(text="已在浏览器打开验证页面，验证一下就到账（15 分钟内有效）。", fg=GOLD)
         self.promo_polls = 36                       # 接下来 3 分钟每 5 秒查一次，到账了马上显示
@@ -1025,8 +1081,8 @@ class Launcher:
         tk.Label(body, text="说说遇到的问题，或者想要的功能。", bg=BG, fg=DIM, font=(FONT, 9),
                  anchor="w").pack(fill="x")
         tk.Label(body, text="问题类型", bg=BG, fg=TEXT, font=(FONT, 9), anchor="w").pack(fill="x", pady=(8, 2))
-        kind = tk.StringVar(value=FEEDBACK_KINDS[0][1])
-        menu = tk.OptionMenu(body, kind, *[label for _, label in FEEDBACK_KINDS])
+        kind = tk.StringVar(value=i18n.t(FEEDBACK_KINDS[0][1]))
+        menu = tk.OptionMenu(body, kind, *[i18n.t(label) for _, label in FEEDBACK_KINDS])
         menu.configure(bg=SEC, fg=TEXT, activebackground=SEC_HOVER, activeforeground=WHITE, relief="flat",
                        highlightthickness=1, highlightbackground=EDGE, font=(FONT, 9), anchor="w")
         menu["menu"].configure(bg=SEC, fg=TEXT, activebackground=BTN, activeforeground=WHITE, font=(FONT, 9))
@@ -1058,7 +1114,7 @@ class Launcher:
             if email and not EMAIL_RE.match(email):
                 msg.configure(text="邮箱格式不对（不想留可以空着）。", fg=BAD)
                 return
-            code = next((c for c, label in FEEDBACK_KINDS if label == kind.get()), "other")
+            code = next((c for c, label in FEEDBACK_KINDS if i18n.t(label) == kind.get()), "other")
             payload = {"kind": code, "text": content[:2000], "contact": email[:120],
                        "version": APP_VERSION}
             if with_diag.get():
@@ -1096,7 +1152,7 @@ class Launcher:
         win.transient(self.root)
         dark_titlebar(win)
         try:
-            win.iconbitmap(resource("assets", "icon.ico"))
+            win.iconbitmap(resource("assets", icon_name()))
         except tk.TclError:
             pass
         body = tk.Frame(win, bg=BG, padx=int(18 * k), pady=int(14 * k))

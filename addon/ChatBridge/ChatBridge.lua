@@ -10,7 +10,7 @@
 ChatBridge = {}
 local CB = ChatBridge
 
-CB.VERSION = "2.7"
+CB.VERSION = "2.8"
 CB.COLS, CB.ROWS, CB.CELL, CB.HEADER = 64, 8, 4, 8
 CB.MAX_PAYLOAD = math.floor((CB.COLS * CB.ROWS - CB.HEADER) * 6 / 8) - 5
 CB.HOLD = 0.25          -- 每条消息的色块显示秒数
@@ -18,6 +18,16 @@ CB.MAX_QUEUE = 30
 
 local floor, strbyte = math.floor, string.byte
 local PREFIX = "|cff66ccffChatBridge|r "
+
+-- 简体 / 繁体：ChatBridge_Lang.lua 由电脑上的启动器写（"hans" / "hant"，跟程序里的选择一致）；
+-- 没写过（比如只从 CurseForge 装了插件）就看游戏客户端语言，台服繁体客户端（zhTW）用繁体。
+-- 繁体文字来自 ChatBridge_Hant.lua（tools/gen_addon_hant.py 生成）。
+CB.hant = (ChatBridgeLang == "hant") or (ChatBridgeLang == nil and GetLocale ~= nil and GetLocale() == "zhTW")
+local HANT = ChatBridge_HANT or {}
+local function L(s)
+    if CB.hant then return HANT[s] or s end
+    return s
+end
 
 -- 识别标记与校准格（每项是 r,g,b 的档位 0~3）
 local FIXED = {
@@ -40,17 +50,17 @@ local TEAM_CODES = { P = true, R = true, X = true, I = true, H = true, B = true 
 
 -- 可订阅的频道：类型码、显示名、颜色（和小程序里的颜色一致）
 CB.CHANNELS = {
-    { "P", "小队", 0.66, 0.71, 1.00 },
-    { "R", "团队", 1.00, 0.58, 0.25 },
-    { "X", "团队通知", 1.00, 0.42, 0.24 },
-    { "I", "副本", 1.00, 0.58, 0.25 },
-    { "H", "悄悄话", 1.00, 0.55, 0.95 },
-    { "B", "战网密语", 0.31, 0.89, 0.88 },
-    { "G", "公会", 0.37, 0.89, 0.42 },
-    { "O", "官员", 0.29, 0.76, 0.34 },
-    { "S", "说", 0.95, 0.95, 0.95 },
-    { "Y", "大喊", 1.00, 0.35, 0.35 },
-    { "C", "公共频道（综合、交易等）", 0.94, 0.75, 0.69 },
+    { "P", L("小队"), 0.66, 0.71, 1.00 },
+    { "R", L("团队"), 1.00, 0.58, 0.25 },
+    { "X", L("团队通知"), 1.00, 0.42, 0.24 },
+    { "I", L("副本"), 1.00, 0.58, 0.25 },
+    { "H", L("悄悄话"), 1.00, 0.55, 0.95 },
+    { "B", L("战网密语"), 0.31, 0.89, 0.88 },
+    { "G", L("公会"), 0.37, 0.89, 0.42 },
+    { "O", L("官员"), 0.29, 0.76, 0.34 },
+    { "S", L("说"), 0.95, 0.95, 0.95 },
+    { "Y", L("大喊"), 1.00, 0.35, 0.35 },
+    { "C", L("公共频道（综合、交易等）"), 0.94, 0.75, 0.69 },
 }
 
 function CB.SetSub(code, on)
@@ -276,7 +286,7 @@ end
 function CB.SendOutgoing(editBox)
     local text = editBox:GetText()
     if isSecret(text) then
-        print(PREFIX .. "现在处于副本限制期间，插件读不到输入框内容。")
+        print(PREFIX .. L("现在处于副本限制期间，插件读不到输入框内容。"))
         return
     end
     if type(text) ~= "string" then return end
@@ -424,7 +434,7 @@ end
 local function refreshButton()
     if not pageButton then return end
     local on = panel:IsShown()
-    pageButton.label:SetText(on and "翻译" or (unread > 0 and ("翻译 " .. unread) or "翻译"))
+    pageButton.label:SetText(on and L("翻译") or (unread > 0 and (L("翻译 ") .. unread) or L("翻译")))
     pageButton.bg:SetColorTexture(on and 0.16 or 0.05, on and 0.42 or 0.06, on and 0.62 or 0.08, 0.9)
 end
 
@@ -442,7 +452,7 @@ function CB.SetUsageMode(on)
     if not panel then return end
     usageMode = on and true or false
     if usageMode and not panel:IsShown() then CB.TogglePage(true) end
-    if usageButtonLabel then usageButtonLabel:SetText(usageMode and "返回" or "用量") end
+    if usageButtonLabel then usageButtonLabel:SetText(usageMode and L("返回") or L("用量")) end
     CB.Enqueue("U\t" .. (usageMode and "1" or "0") .. "\t")
     sendRect(true)
 end
@@ -534,7 +544,7 @@ local function buildPage()
     note:SetWordWrap(false)
     -- 这句提示一直画着，但翻译程序开着时会被它的同色遮片盖住，所以只有程序没开时才看得见
     -- 从 CurseForge 只装了插件的人也要看得懂：没装程序就去官网下载（只给地址，不提钱）
-    note:SetText("没开翻译程序？下载 wow.husen.ca")
+    note:SetText(L("没开翻译程序？下载 wow.husen.ca"))
 
     -- 中间的提示卡：比底条那句显眼。还没收到过聊天时才显示（之后页面上有译文，卡就收起来）。
     -- 位置通过翻译页矩形一起发给小程序：程序开着时它在同一位置盖一张同色的卡，写「已连上，等待聊天」，
@@ -548,12 +558,12 @@ local function buildPage()
     cardBg:SetColorTexture(0.10, 0.12, 0.16, 1)
     local cardTitle = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     cardTitle:SetPoint("TOP", card, "TOP", 0, -9)
-    cardTitle:SetText("翻译程序没开")
+    cardTitle:SetText(L("翻译程序没开"))
     local cardText = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     cardText:SetPoint("TOP", cardTitle, "BOTTOM", 0, -5)
     cardText:SetPoint("LEFT", card, "LEFT", 8, 0)
     cardText:SetPoint("RIGHT", card, "RIGHT", -8, 0)
-    cardText:SetText("去 wow.husen.ca 下载电脑程序，打开后点「启动」")
+    cardText:SetText(L("去 wow.husen.ca 下载电脑程序，打开后点「启动」"))
     CB.card = card
 
     -- 滚轮翻看之前的译文（译文由小程序显示，这里把滚动转给它）
@@ -568,7 +578,7 @@ local function buildPage()
     usageHover:SetColorTexture(1, 1, 1, 0.12)
     local usageLabel = usage:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     usageLabel:SetPoint("CENTER")
-    usageLabel:SetText("用量")
+    usageLabel:SetText(L("用量"))
     usageButtonLabel = usageLabel
     usage:SetScript("OnClick", function() CB.RequestUsage() end)
 
@@ -599,7 +609,7 @@ local function buildPage()
     grip:SetScript("OnEnter", function(self)
         if not GameTooltip then return end
         GameTooltip:SetOwner(self, "ANCHOR_TOPRIGHT")
-        GameTooltip:AddLine("按住拖动，调整翻译页大小", 1, 1, 1)
+        GameTooltip:AddLine(L("按住拖动，调整翻译页大小"), 1, 1, 1)
         GameTooltip:Show()
     end)
     grip:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
@@ -634,10 +644,10 @@ local function buildPage()
     pageButton:SetScript("OnEnter", function(self)
         if not GameTooltip then return end
         GameTooltip:SetOwner(self, "ANCHOR_TOP")
-        GameTooltip:AddLine("翻译")
-        GameTooltip:AddLine("左键：展开 / 收起译文", 1, 1, 1)
-        GameTooltip:AddLine("右键：选择翻译哪些频道", 1, 1, 1)
-        GameTooltip:AddLine("按住拖动：连同翻译页一起换位置", 1, 1, 1)
+        GameTooltip:AddLine(L("翻译"))
+        GameTooltip:AddLine(L("左键：展开 / 收起译文"), 1, 1, 1)
+        GameTooltip:AddLine(L("右键：选择翻译哪些频道"), 1, 1, 1)
+        GameTooltip:AddLine(L("按住拖动：连同翻译页一起换位置"), 1, 1, 1)
         GameTooltip:Show()
     end)
     pageButton:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
@@ -732,7 +742,7 @@ local function buildSettings()
 
     local title = settings:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     title:SetPoint("TOPLEFT", PAD, -PAD)
-    title:SetText("翻译哪些频道")
+    title:SetText(L("翻译哪些频道"))
 
     for i, c in ipairs(CB.CHANNELS) do
         local code = c[1]
@@ -759,13 +769,13 @@ local function buildSettings()
     end
 
     local y = PAD
-    local team = smallButton(settings, "只看队友", 74, function() CB.ApplyPreset("team") end)
+    local team = smallButton(settings, L("只看队友"), 74, function() CB.ApplyPreset("team") end)
     team:SetPoint("BOTTOMLEFT", PAD, y)
-    local all = smallButton(settings, "全选", 50, function() CB.ApplyPreset("all") end)
+    local all = smallButton(settings, L("全选"), 50, function() CB.ApplyPreset("all") end)
     all:SetPoint("LEFT", team, "RIGHT", 6, 0)
-    local none = smallButton(settings, "全不选", 56, function() CB.ApplyPreset("none") end)
+    local none = smallButton(settings, L("全不选"), 56, function() CB.ApplyPreset("none") end)
     none:SetPoint("LEFT", all, "RIGHT", 6, 0)
-    local close = smallButton(settings, "关闭", 48, function() settings:Hide() end)
+    local close = smallButton(settings, L("关闭"), 48, function() settings:Hide() end)
     close:SetPoint("BOTTOMRIGHT", -PAD, y)
 
     settings:Hide()
@@ -775,7 +785,7 @@ end
 function CB.ToggleSettings()
     if not settings then
         local ok, err = pcall(buildSettings)
-        if not ok then print(PREFIX .. "设置窗口没建成: " .. tostring(err)); return end
+        if not ok then print(PREFIX .. L("设置窗口没建成: ") .. tostring(err)); return end
     end
     if settings:IsShown() then settings:Hide() else settings:Show() end
 end
@@ -815,14 +825,14 @@ events:SetScript("OnEvent", function(_, event, ...)
         pcall(hookEditBoxes)
         CB.Enqueue("@\t" .. CB.VERSION .. "\t" .. (UnitName("player") or ""))
         local ok, err = pcall(buildPage)
-        if not ok then print(PREFIX .. "翻译页没建成: " .. tostring(err)) end
+        if not ok then print(PREFIX .. L("翻译页没建成: ") .. tostring(err)) end
         CB.UpdateCard(true)
         sendRect(true)
         CB.Announce()
-        print(PREFIX .. "已加载。点「翻译」看译文（按钮和翻译页都能拖）；打中文后按 Ctrl+T 翻成英文。/cb 看更多。")
+        print(PREFIX .. L("已加载。点「翻译」看译文（按钮和翻译页都能拖）；打中文后按 Ctrl+T 翻成英文。/cb 看更多。"))
         if not ChatBridgeDB.welcomed then        -- 第一次装：说清楚还要一个电脑程序（CurseForge 上只有插件）
             ChatBridgeDB.welcomed = true
-            print(PREFIX .. "这个插件要配合电脑上的免费翻译程序使用（Windows）。还没装的话去 wow.husen.ca 下载，打开后点「启动」。")
+            print(PREFIX .. L("这个插件要配合电脑上的免费翻译程序使用（Windows）。还没装的话去 wow.husen.ca 下载，打开后点「启动」。"))
         end
     elseif event == "LOADING_SCREEN_DISABLED" then
         CB.Announce()
@@ -831,7 +841,7 @@ events:SetScript("OnEvent", function(_, event, ...)
     else
         local text, sender, _, _, _, _, _, _, _, _, _, guid = ...
         local ok, err = pcall(onChat, event, text, sender, guid)
-        if not ok and ChatBridgeDB.debug then print(PREFIX .. "出错: " .. tostring(err)) end
+        if not ok and ChatBridgeDB.debug then print(PREFIX .. L("出错: ") .. tostring(err)) end
     end
 end)
 
@@ -846,7 +856,7 @@ for event in pairs(CODES) do pcall(events.RegisterEvent, events, event) end
 -- 命令
 ---------------------------------------------------------------------------
 
-local function onOff(b) return b and "|cff00ff00开|r" or "|cffff4040关|r" end
+local function onOff(b) return b and L("|cff00ff00开|r") or L("|cffff4040关|r") end
 
 SLASH_CHATBRIDGE1 = "/cb"
 SLASH_CHATBRIDGE2 = "/chatbridge"
@@ -854,47 +864,47 @@ SlashCmdList.CHATBRIDGE = function(msg)
     msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
     if msg == "test" then
         CB.Enqueue("T\tChatBridge\tlfm 1 healer for deadmines, pst. can someone brez me after this pull?")
-        print(PREFIX .. "已发出一条测试消息，翻译小程序里应该出现译文。")
+        print(PREFIX .. L("已发出一条测试消息，翻译小程序里应该出现译文。"))
     elseif msg == "page" then
         CB.TogglePage()
     elseif msg == "usage" then
         CB.RequestUsage()
     elseif msg == "account" then
         CB.Enqueue("A\t\t")
-        print(PREFIX .. "已让电脑上的翻译小程序打开设备编号窗口（切出游戏看）。")
+        print(PREFIX .. L("已让电脑上的翻译小程序打开设备编号窗口（切出游戏看）。"))
     elseif msg == "reset" then
         CB.ResetLayout()
-        print(PREFIX .. "按钮和翻译页已放回默认位置。")
+        print(PREFIX .. L("按钮和翻译页已放回默认位置。"))
     elseif msg == "sync" then
         sendRect(true)
-        print(PREFIX .. "已把翻译页的位置重新发给小程序。")
+        print(PREFIX .. L("已把翻译页的位置重新发给小程序。"))
     elseif msg == "team" then
         CB.ApplyPreset("team")
-        print(PREFIX .. "已切到只看队友：小队、团队、副本、密语。")
+        print(PREFIX .. L("已切到只看队友：小队、团队、副本、密语。"))
     elseif msg == "all" then
         CB.ApplyPreset("all")
-        print(PREFIX .. "已订阅全部频道。")
+        print(PREFIX .. L("已订阅全部频道。"))
     elseif msg == "channel" then
         CB.SetSub("C", not ChatBridgeDB.subs.C)
-        print(PREFIX .. "公共频道（交易、综合等）翻译: " .. onOff(ChatBridgeDB.subs.C))
+        print(PREFIX .. L("公共频道（交易、综合等）翻译: ") .. onOff(ChatBridgeDB.subs.C))
     elseif msg == "config" or msg == "settings" then
         CB.ToggleSettings()
     elseif msg == "on" or msg == "off" then
         ChatBridgeDB.enabled = (msg == "on")
-        print(PREFIX .. "翻译桥: " .. onOff(ChatBridgeDB.enabled))
+        print(PREFIX .. L("翻译桥: ") .. onOff(ChatBridgeDB.enabled))
     elseif msg == "debug" then
         ChatBridgeDB.debug = not ChatBridgeDB.debug
-        print(PREFIX .. "调试信息: " .. onOff(ChatBridgeDB.debug))
+        print(PREFIX .. L("调试信息: ") .. onOff(ChatBridgeDB.debug))
     else
         local names = {}
         for _, c in ipairs(CB.CHANNELS) do
             if ChatBridgeDB.subs[c[1]] then names[#names + 1] = c[2] end
         end
-        print(PREFIX .. "v" .. CB.VERSION .. "  翻译桥: " .. onOff(ChatBridgeDB.enabled))
-        print(PREFIX .. "正在翻译的频道: " .. (#names > 0 and table.concat(names, "、") or "无")
-            .. "（右键聊天框上的「翻译」按钮可以改）")
-        print(PREFIX .. "发消息: 聊天框里打中文，按 Ctrl+T（或末尾打 ;;），等一下再 Ctrl+V、回车。")
-        print(PREFIX .. "命令: /cb config | /cb usage | /cb account | /cb page | /cb reset | /cb team | /cb all | /cb test | /cb on | /cb off")
-        print(PREFIX .. "翻译由电脑上的免费程序完成，下载：wow.husen.ca")
+        print(PREFIX .. "v" .. CB.VERSION .. L("  翻译桥: ") .. onOff(ChatBridgeDB.enabled))
+        print(PREFIX .. L("正在翻译的频道: ") .. (#names > 0 and table.concat(names, L("、")) or L("无"))
+            .. L("（右键聊天框上的「翻译」按钮可以改）"))
+        print(PREFIX .. L("发消息: 聊天框里打中文，按 Ctrl+T（或末尾打 ;;），等一下再 Ctrl+V、回车。"))
+        print(PREFIX .. L("命令: /cb config | /cb usage | /cb account | /cb page | /cb reset | /cb team | /cb all | /cb test | /cb on | /cb off"))
+        print(PREFIX .. L("翻译由电脑上的免费程序完成，下载：wow.husen.ca"))
     end
 end
