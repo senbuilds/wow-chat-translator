@@ -6,7 +6,7 @@
 
 **World of Warcraft chat translator (English ⇄ Chinese) for WoW Forever / US servers** — 魔兽世界美服 / 魔兽世界「无限」聊天实时翻译插件。
 
-官网与下载：<https://wow.husen.ca> · CurseForge：[ChatBridge Translator](https://www.curseforge.com/wow/addons/chatbridge-translator) · 教程：[安装](https://wow.husen.ca/guide/install.html) ·
+官网与下载：<https://wow.husen.ca> · [更新日志 / Changelog](CHANGELOG.md) · CurseForge：[ChatBridge Translator](https://www.curseforge.com/wow/addons/chatbridge-translator) · 教程：[安装](https://wow.husen.ca/guide/install.html) ·
 [免费接 Gemini](https://wow.husen.ca/guide/free-gemini.html) · [魔兽黑话缩写大全](https://wow.husen.ca/guide/wow-slang.html)
 
 队友的英文和黑话（LoS、brez、pat、WTS、COD……）实时翻成中文，直接显示在游戏聊天框旁的「翻译」页里；
