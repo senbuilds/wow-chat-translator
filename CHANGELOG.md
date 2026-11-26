@@ -3,6 +3,15 @@
 程序安装包在官网下载：<https://wow.husen.ca>（启动器里点「检查更新」可以直接升级）。游戏插件也在 [CurseForge](https://www.curseforge.com/wow/addons/chatbridge-translator)。
 日期按 UTC。
 
+## 1.4.0 · 插件 2.9（2026-11-26）
+- 队伍里的接话翻得更准：翻小队 / 团队 / 副本 / 密语时，会参考同一场对话刚才的几句（最多 3 句、2 分钟内）。公共频道、公会、说 / 喊不带。这几句只用来帮忙看懂，翻完就丢，不多扣额度。
+- 物品 / 技能链接显示成你客户端里的名字：老外发的 [Arcanite Reaper] 在中文客户端里直接是 [奥金斧]（繁体客户端是台服译名）。
+- 发话时可以带物品链接：聊天框里 Shift+点击插入的链接，按 Ctrl+T 翻译后还是能点的链接。
+- 自带模型：直接选服务商（DeepSeek、OpenAI、Gemini、Claude、通义千问、智谱、硅基流动、OpenRouter、本机 Ollama / LM Studio），粘贴密钥就能用。
+- 繁体：游戏名统一叫「永恆」。
+- 有新版本时提示更显眼：启动器顶部出现横幅和「立即更新」按钮，游戏里的翻译页也会提示一句。
+- Party replies use the last few lines as context; item/spell links show your client's localized names; links survive Ctrl+T; provider presets for bring-your-own-model.
+
 ## 1.3.5（2026-11-26）
 - 翻译页会提示漏读：游戏画面左上角被别的窗口挡住、游戏最小化或卡顿时，程序没读到的聊天会提示「漏了几条」，并计入匿名连接统计。
 - The translation page now tells you when chat lines were missed (game corner covered, minimized or stuttering).

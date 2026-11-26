@@ -51,6 +51,22 @@ BTN_OFF, OFF_TEXT, OFF_EDGE = "#211710", "#6f604f", "#2e241c"
 GOOD, BAD, WARN = "#8fc46a", "#e8664f", "#edaf00"
 CARD, CARD_LINE, LINE_SOFT = "#24170f", "#3d2c20", "#2e2119"     # 卡片底色、卡片描边、分隔线
 UI_SCALES = (100, 125, 150, 175, 200, 225, 250, 300)            # assets/ui 里预先生成的缩放比例
+# 自带模型的服务商预设：(名字, 接口地址, 默认模型, 密钥在哪拿)。都是 OpenAI 兼容接口；模型名各家会换代，填好后可以手改。
+OWN_PROVIDERS = [
+    ("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", "密钥在 platform.deepseek.com →「API keys」里创建。"),
+    ("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini", "密钥在 platform.openai.com →「API keys」里创建。"),
+    ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash",
+     "密钥在 aistudio.google.com →「Get API key」里创建。"),
+    ("Claude（Anthropic）", "https://api.anthropic.com/v1", "claude-haiku-5-5", "密钥在 console.anthropic.com →「API Keys」里创建。"),
+    ("通义千问（阿里云百炼）", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus", "密钥在阿里云百炼控制台 →「API-KEY」里创建。"),
+    ("智谱 GLM", "https://open.bigmodel.cn/api/paas/v4", "glm-4-flash", "密钥在 open.bigmodel.cn →「API 密钥」里创建。"),
+    ("硅基流动 SiliconFlow", "https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-7B-Instruct", "密钥在 cloud.siliconflow.cn →「API 密钥」里创建。"),
+    ("OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini", "密钥在 openrouter.ai →「Keys」里创建；模型名照它网站上的写。"),
+    ("本机 Ollama", "http://127.0.0.1:11434/v1", "qwen2.5:7b", "不用密钥。模型名填你用 ollama pull 下载的那个。"),
+    ("本机 LM Studio", "http://127.0.0.1:1234/v1", "local-model", "不用密钥。先在 LM Studio 的 Developer 页面启动服务器，模型名照它显示的填。"),
+    ("自己填（其他 OpenAI 兼容接口）", "", "", "接口地址以 http:// 或 https:// 开头，一般以 /v1 结尾。"),
+]
+
 FLAVOR_NAMES = {"_forever_": "魔兽世界「无限」", "_retail_": "魔兽世界 正式服", "_classic_": "魔兽世界 怀旧服",
                 "_classic_era_": "魔兽世界 经典怀旧服", "_classic_beta_": "怀旧服测试服", "_ptr_": "正式服测试服",
                 "_beta_": "测试服"}
@@ -164,6 +180,15 @@ def version_key(v):
 # 检查更新：服务器上的 latest.json 写着最新版本号、安装包地址和它的 SHA-256。
 # 下载完先核对 SHA-256，对不上就丢掉；地址只认我们自己域名下的 /download/。
 # ---------------------------------------------------------------------------
+
+def write_update_hint(hint):
+    """告诉游戏里的翻译页有没有新版本（它自己不联网查）：写在配置文件旁边的 update.json。"""
+    try:
+        with open(app.UPDATE_HINT_PATH, "w", encoding="utf-8") as f:
+            json.dump(hint, f)
+    except OSError:
+        pass
+
 
 def fetch_latest():
     """返回 (更新信息, 错误说明)。"""
@@ -295,6 +320,8 @@ class Card(tk.Canvas):
         h = max(self.need(), self.min_h)
         if int(float(self.cget("height"))) != h:
             self.configure(height=h)
+        # 里面的内容区也撑到卡片的高度：两张卡片等高时，矮的那张底部的按钮才会和另一张对齐
+        self.itemconfigure(self.win, height=h - 2 * self.p)
 
     def _layout(self, e):
         self.itemconfigure(self.win, width=max(1, e.width - 2 * self.p))
@@ -434,7 +461,20 @@ class Launcher:
 
         # --- 两块：余额 / 游戏 ---
         tiles = tk.Frame(body, bg=BG)
+        # 有新版本时的横幅（平时不显示）：以前只在页脚有一行小字，很多人没看见
+        self.update_banner = tk.Frame(body, bg=CARD, highlightthickness=1, highlightbackground=GOLD,
+                                      padx=int(12 * k), pady=int(8 * k))
+        self.update_banner_button = WowButton(self.update_banner, "立即更新", self.update_action, width=8, primary=True)
+        self.update_banner_button.pack(side="right", padx=(int(10 * k), 0))
+        col = tk.Frame(self.update_banner, bg=CARD)
+        col.pack(side="left", fill="x", expand=True)
+        self.update_banner_text = tk.Label(col, text="", bg=CARD, fg=GOLD, font=(FONT, 10, "bold"), anchor="w",
+                                           justify="left", wraplength=int(300 * k))
+        self.update_banner_text.pack(fill="x")
+        self.update_banner_notes = tk.Label(col, text="", bg=CARD, fg=TEXT, font=(FONT, 9), anchor="w",
+                                            justify="left", wraplength=int(300 * k))
         tiles.pack(fill="x", pady=(int(12 * k), 0))
+        self.tiles_frame = tiles
         tiles.grid_columnconfigure(0, weight=115, uniform="tile")
         tiles.grid_columnconfigure(1, weight=100, uniform="tile")
         bal = Card(tiles, pad=16)
@@ -910,11 +950,30 @@ class Launcher:
         elif version_key(info["version"]) > version_key(APP_VERSION):
             self.pending_update = info
             notes = str(info.get("notes", ""))[:80]
-            self.update_label.configure(text="发现新版本 %s%s" % (info["version"], ("：" + notes) if notes else ""), fg=GOLD)
+            self.update_label.configure(text="发现新版本 %s" % info["version"], fg=GOLD)     # 说明写在上面的横幅里
             self.update_button.set("立即更新")
+            # 最低可用版本（服务器平时不写这一项）：比它旧就换成红色的「太旧」提示
+            low = str(info.get("min_version") or "")
+            too_old = bool(re.fullmatch(r"\d+(\.\d+){1,3}", low)) and version_key(APP_VERSION) < version_key(low)
+            self.update_banner_text.configure(
+                text=("这个版本太旧了，请更新到 %s" % info["version"]) if too_old
+                else "有新版本 %s" % info["version"], fg=BAD if too_old else GOLD)
+            if too_old:
+                notes = "不更新的话，有些功能可能不正常。"
+            self.update_banner_notes.configure(text=notes)
+            if notes and not self.update_banner_notes.winfo_ismapped():
+                self.update_banner_notes.pack(fill="x", pady=(int(2 * self.k), 0))
+            elif not notes and self.update_banner_notes.winfo_ismapped():
+                self.update_banner_notes.pack_forget()
+            self.update_banner.configure(highlightbackground=BAD if too_old else GOLD)
+            if not self.update_banner.winfo_ismapped():
+                self.update_banner.pack(fill="x", pady=(int(12 * self.k), 0), before=self.tiles_frame)
+                self.refit()
+            write_update_hint({"latest": info["version"], "min": low if too_old else ""})
         else:
             self.update_label.configure(text=("版本 %s · 已是最新" % APP_VERSION) if manual else "版本 %s" % APP_VERSION,
                                         fg=GOOD if manual else DIM)
+            write_update_hint({})
 
     def start_update(self):
         info = self.pending_update
@@ -1267,13 +1326,37 @@ class Launcher:
         win, body = self.dialog("自带模型")
         wrap = int(380 * self.k)
         m = self.cfg.get("own_model") or {}
-        tk.Label(body, text="用你自己的模型翻译（OpenAI 兼容接口：OpenAI、DeepSeek、本机 Ollama 等都行）。\n"
-                            "打开后翻译不经过线上服务、不扣额度；密钥只存在这台电脑上。\n"
+        tk.Label(body, text="用你自己的模型翻译：选一家服务商，把密钥粘进来就能用。\n"
+                            "打开后翻译不经过线上服务、不扣额度；密钥只存在这台电脑上，只发给你选的这家。\n"
                             "注意：线上服务专门调教过魔兽黑话，自带模型没有这部分。",
                  bg=BG, fg=DIM, font=(FONT, 9), anchor="w", justify="left", wraplength=int(520 * self.k)).pack(fill="x")
-        url = self.field(body, "接口地址（例如 https://api.openai.com/v1 或 http://127.0.0.1:11434/v1）", m.get("base_url", ""))
+        # 服务商预设：选了就把接口地址和模型名填好，只差密钥。都能再手改；「自己填」就是以前的三个空格。
+        tk.Label(body, text="服务商", bg=BG, fg=TEXT, font=(FONT, 9), anchor="w").pack(fill="x", pady=(8, 2))
+        names = [i18n.t(pv[0]) for pv in OWN_PROVIDERS]
+        saved = next((i18n.t(pv[0]) for pv in OWN_PROVIDERS if pv[1] and pv[1] == m.get("base_url", "").rstrip("/")),
+                     names[-1] if m.get("base_url") else names[0])
+        provider = tk.StringVar(value=saved)
+        menu = tk.OptionMenu(body, provider, *names)
+        menu.configure(bg=SEC, fg=TEXT, activebackground=SEC_HOVER, activeforeground=WHITE, relief="flat",
+                       highlightthickness=1, highlightbackground=EDGE, font=(FONT, 9), anchor="w")
+        menu["menu"].configure(bg=SEC, fg=TEXT, activebackground=BTN, activeforeground=WHITE, font=(FONT, 9))
+        menu.pack(fill="x")
+        hint = tk.Label(body, text="", bg=BG, fg=DIM, font=(FONT, 9), anchor="w", justify="left", wraplength=int(520 * self.k))
+        hint.pack(fill="x", pady=(4, 0))
+        url = self.field(body, "接口地址", m.get("base_url", ""))
         key = self.field(body, "密钥（本机模型可以不填）", m.get("api_key", ""), show="•")
-        model = self.field(body, "模型名（例如 gpt-4o-mini、deepseek-chat、qwen2.5:7b）", m.get("model", ""))
+        model = self.field(body, "模型名", m.get("model", ""))
+
+        def pick(*_, fill=True):
+            pv = OWN_PROVIDERS[names.index(provider.get())]
+            hint.configure(text=i18n.t(pv[3]))
+            if fill and pv[1]:
+                for entry, value in ((url, pv[1]), (model, pv[2])):
+                    entry.delete(0, "end")
+                    entry.insert(0, value)
+
+        provider.trace_add("write", pick)
+        pick(fill=not m.get("base_url"))             # 以前填过的不动；第一次打开按默认那家填好
         on = tk.BooleanVar(value=bool(m.get("enabled")))
         tk.Checkbutton(body, text="使用自带模型（取消勾选就回到线上翻译服务）", variable=on, bg=BG, fg=TEXT,
                        selectcolor=FIELD, activebackground=BG, activeforeground=GOLD, font=(FONT, 9),

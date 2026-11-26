@@ -356,6 +356,47 @@ def main():
     pump(1.0)
     assert [p for _, p in seen[before:]] == [b"P\tMate\tagain"], "刚补发过就不该再发"
 
+    # 物品链接：用编号查本机客户端的名字（中文客户端就是中文名），换进方括号
+    lua.execute("""
+        names, requested, timers = { [12784] = "奥金斧" }, {}, {}
+        C_Item = { GetItemNameByID = function(id) return names[id] end,
+                   RequestLoadItemDataByID = function(id) requested[#requested + 1] = id end }
+        C_Timer = { After = function(_, f) timers[#timers + 1] = f end }
+        function runtimers() local t = timers; timers = {}; for _, f in ipairs(t) do f() end end
+    """.encode())
+    link = "|cffa335ee|Hitem:%d::::::::60:::::|h[%s]|h|r"
+    before = len(seen)
+    fire(b"CHAT_MSG_PARTY", ("WTS " + link % (12784, "Arcanite Reaper") + " 50g").encode(), b"Mate")
+    pump(1.0)
+    assert [p.decode() for _, p in seen[before:]] == ["P\tMate\tWTS [奥金斧] 50g"], seen[before:]
+    # 本机还没缓存的物品：先让客户端去取，等一下再发；取到了用中文名
+    before = len(seen)
+    fire(b"CHAT_MSG_PARTY", ("need " + link % (999, "Felstriker") + " ?").encode(), b"Mate")
+    pump(1.0)
+    assert len(seen) == before and list(lua.eval("requested").values()) == [999], "没缓存的物品应先等一下"
+    lua.execute("names[999] = '魔王之刃'".encode())
+    lua.eval("runtimers")()
+    pump(1.0)
+    assert [p.decode() for _, p in seen[before:]] == ["P\tMate\tneed [魔王之刃] ?"], seen[before:]
+    # 一直取不到：照原名发，不卡住
+    before = len(seen)
+    fire(b"CHAT_MSG_PARTY", ("lol " + link % (555, "Mystery Thing")).encode(), b"Mate")
+    lua.eval("runtimers")()
+    pump(1.0)
+    assert [p.decode() for _, p in seen[before:]] == ["P\tMate\tlol [Mystery Thing]"], seen[before:]
+
+    # 发话时插了物品链接：送去翻的是 {1} 占位符；译文贴回聊天框后换回真链接
+    mine = link % (12784, "奥金斧")
+    before = len(seen)
+    lua.eval("typebox")(("出 " + mine + " 50金;;").encode())
+    pump(1.0)
+    assert [p.decode() for _, p in seen[before:]] == ["Q\t\t出 {1} 50金"], seen[before:]
+    lua.eval("typebox")(b"WTS {1} 50g")
+    assert lua.eval("boxtext()").decode() == "WTS " + mine + " 50g", lua.eval("boxtext()")
+    lua.eval("typebox")(b"plain {1} text")
+    assert lua.eval("boxtext()") == b"plain {1} text", "换过一次就不再换"
+    lua.eval("typebox")(b"")
+
     print("addon tests passed:", len(seen), "frames decoded")
 
 

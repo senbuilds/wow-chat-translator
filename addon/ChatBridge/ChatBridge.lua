@@ -10,7 +10,7 @@
 ChatBridge = {}
 local CB = ChatBridge
 
-CB.VERSION = "2.8"
+CB.VERSION = "2.9"
 CB.COLS, CB.ROWS, CB.CELL, CB.HEADER = 64, 8, 4, 8
 CB.MAX_PAYLOAD = math.floor((CB.COLS * CB.ROWS - CB.HEADER) * 6 / 8) - 5
 CB.HOLD = 0.25          -- 每条消息的色块显示秒数
@@ -106,8 +106,47 @@ function CB.BuildSymbols(payload, seq)
     return syms
 end
 
+---------------------------------------------------------------------------
+-- 物品 / 技能 / 任务链接：聊天里的链接带着编号，名字却是发的人那边客户端的语言（老外发来就是英文）。
+-- 这里用编号向本机客户端查名字，中文客户端查到的就是官方中文名（繁体客户端是台服译名），
+-- 直接换进方括号里，翻译服务就不用猜物品名了。查不到（客户端还没缓存这件物品）就留原名。
+---------------------------------------------------------------------------
+
+local function localName(kind, id)
+    local ok, name
+    if kind == "item" then
+        if C_Item and C_Item.GetItemNameByID then ok, name = pcall(C_Item.GetItemNameByID, id) end
+        if (not ok or not name) and GetItemInfo then ok, name = pcall(GetItemInfo, id) end
+    elseif kind == "spell" or kind == "enchant" then
+        if C_Spell and C_Spell.GetSpellName then ok, name = pcall(C_Spell.GetSpellName, id) end
+        if (not ok or not name) and GetSpellInfo then ok, name = pcall(GetSpellInfo, id) end
+    elseif kind == "quest" then
+        if C_QuestLog and C_QuestLog.GetTitleForQuestID then ok, name = pcall(C_QuestLog.GetTitleForQuestID, id) end
+    end
+    if ok and type(name) == "string" and name ~= "" and not (issecretvalue and issecretvalue(name)) then return name end
+end
+CB.LocalName = localName
+
+-- 把链接换成 [本机客户端里的名字]；第二个返回值是还没缓存、查不到名字的物品编号
+function CB.LocalizeLinks(text)
+    local missing
+    text = text:gsub("|H(%a+):(%d+)([^|]*)|h%[(.-)%]|h", function(kind, id, rest, shown)
+        id = tonumber(id)
+        local name = id and localName(kind, id)
+        if name then
+            return "|H" .. kind .. ":" .. id .. rest .. "|h[" .. name .. "]|h"
+        end
+        if kind == "item" and id then
+            missing = missing or {}
+            missing[#missing + 1] = id
+        end
+    end)
+    return text, missing
+end
+
 -- 去掉颜色码、链接、图标等转义，只留纯文本
 function CB.Clean(text)
+    text = CB.LocalizeLinks(text)
     text = text:gsub("|c%x%x%x%x%x%x%x%x", "")
     text = text:gsub("|cn[^:]*:", "")
     text = text:gsub("|r", "")
@@ -254,6 +293,22 @@ local function onChat(event, text, sender, guid)
         if name == "" then name = "?" end
     end
 
+    -- 链接里有本机还没缓存的物品：让客户端去取名字，0.4 秒后再发这一条（取不到就用原名）
+    if not CB.retrying and C_Timer and C_Timer.After and text:find("|Hitem:", 1, true) then
+        local _, missing = CB.LocalizeLinks(text)
+        if missing then
+            for _, id in ipairs(missing) do
+                if C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, id) end
+            end
+            C_Timer.After(0.4, function()
+                CB.retrying = true
+                pcall(CB.OnChat, event, text, sender, guid)
+                CB.retrying = false
+            end)
+            return
+        end
+    end
+
     local clean = CB.Clean(text)
     if clean == "" then return end
     -- 有聊天要翻的时候，如果翻译页位置有一阵没发了，顺手先补发一次：
@@ -269,6 +324,8 @@ local function onChat(event, text, sender, guid)
         if CB.UpdateCard then CB.UpdateCard() end
     end
 end
+
+CB.OnChat = onChat
 
 ---------------------------------------------------------------------------
 -- 发消息：在游戏聊天框里打中文，按 Ctrl+T（或在末尾打两个分号），
@@ -294,8 +351,33 @@ function CB.SendOutgoing(editBox)
     if cut then text = text:sub(1, -cut - 1) end
     text = text:gsub("^%s+", ""):gsub("%s+$", "")
     if text == "" then return end
+    -- 这句话里插了物品 / 技能链接（Shift+点击）：先换成 {1} {2} 占位符再送去翻，链接本身记在这里；
+    -- 译文贴回聊天框时再把占位符换回真链接，发出去的还是能点的链接。
+    local links = {}
+    text = text:gsub("|c%x%x%x%x%x%x%x%x|H.-|h.-|h|r", function(link)
+        links[#links + 1] = link
+        return "{" .. #links .. "}"
+    end)
+    text = text:gsub("|H.-|h(.-)|h", "%1"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+    CB.outLinks = #links > 0 and links or nil
+    CB.outLinksAt = GetTime()
     CB.Enqueue("Q\t\t" .. text)
     editBox:SetText("")
+end
+
+-- 译文贴进聊天框以后：把 {1} {2} 换回刚才记下的链接
+function CB.RestoreLinks(editBox)
+    local links = CB.outLinks
+    if not links then return end
+    if GetTime() - (CB.outLinksAt or 0) > 60 then CB.outLinks = nil return end
+    local text = editBox:GetText()
+    if isSecret(text) or type(text) ~= "string" or not text:find("{%d+}") then return end
+    local n
+    text, n = text:gsub("{(%d+)}", function(i) return links[tonumber(i)] end)
+    if n > 0 then
+        CB.outLinks = nil
+        editBox:SetText(text)
+    end
 end
 
 local function hookEditBoxes()
@@ -309,6 +391,7 @@ local function hookEditBoxes()
                 end
             end)
             box:HookScript("OnTextChanged", function(self, userInput)
+                if CB.outLinks then CB.RestoreLinks(self) end
                 if not userInput then return end
                 local text = self:GetText()
                 if isSecret(text) or type(text) ~= "string" then return end
