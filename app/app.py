@@ -162,6 +162,21 @@ class Grabber:
         return self.buf[i + 2], self.buf[i + 1], self.buf[i]   # BGRA -> RGB
 
 
+class GapCounter:
+    """插件每发一条色块编号 +1（0~255 循环）。读到的编号跳号了，就说明中间有色块没读到（游戏左上角被挡住、
+    游戏最小化、画面卡顿……）。返回这次漏了几条。插件重新加载时编号从头开始，它会先发一条「@」打招呼，碰到就重新对齐。"""
+
+    def __init__(self):
+        self.last = None
+
+    def feed(self, seq, payload):
+        prev, self.last = self.last, seq
+        if prev is None or payload.startswith(b"@\t"):
+            return 0
+        gap = (seq - prev - 1) % 256
+        return gap if 0 < gap < 200 else 0          # 跳得太多多半是插件重载 / 很久没读，不当成漏读
+
+
 class CaptureThread(threading.Thread):
     def __init__(self, cfg, out):
         super().__init__(daemon=True)
@@ -169,6 +184,7 @@ class CaptureThread(threading.Thread):
         self.hwnd = None
         self.window_ok = False
         self.origin = None      # 游戏窗口客户区左上角在屏幕上的位置
+        self.gaps = GapCounter()
 
     def run(self):
         grabber = Grabber(codec.WIDTH, codec.HEIGHT)
@@ -198,6 +214,9 @@ class CaptureThread(threading.Thread):
                 frame = None
             if frame and frame != last:
                 last = frame
+                lost = self.gaps.feed(frame[0], frame[1])
+                if lost:
+                    self.out.put(b"~\t%d\t" % lost)
                 self.out.put(frame[1])
 
 
@@ -545,7 +564,7 @@ class Overlay:
         self.placed = None
         self.game_gone_since = None
         # 给诊断用的计数（只有数字）：收到几条聊天、翻了几条、出错几次、按频道和错误原因分
-        self.stats = {"chat": 0, "tr": 0, "err": 0, "secret": 0, "nobal": 0, "addon_ver": "", "last_chat": 0,
+        self.stats = {"chat": 0, "tr": 0, "err": 0, "secret": 0, "nobal": 0, "lost": 0, "addon_ver": "", "last_chat": 0,
                       "chan": {}, "errs": {}, "started": int(time.time())}
         self.status_written = 0.0
 
@@ -753,7 +772,9 @@ class Overlay:
             if len(parts) < 3:
                 continue
             code, sender, text = parts
-            if code == "@":
+            if code == "~":
+                self.ui.put(("lost", int(sender or 0)))
+            elif code == "@":
                 self.ui.put(("hello", sender, text))
             elif code == "!":
                 self.ui.put(("secret", sender))
@@ -865,6 +886,12 @@ class Overlay:
                     if hello != getattr(self, "last_hello", None):
                         self.last_hello = hello
                         self._append([("已连上游戏，角色 %s，插件 v%s" % (item[2], item[1]), "note")])
+                elif kind == "lost":
+                    self.stats["lost"] += item[1]
+                    if time.time() - getattr(self, "last_lost_note", 0) > 30:     # 30 秒最多提示一次
+                        self.last_lost_note = time.time()
+                        self._append([("（有 %d 条聊天没读到：游戏画面左上角被别的窗口挡住、游戏最小化或卡顿时会漏。）"
+                                       % item[1], "warn")])
                 elif kind == "secret":
                     self.stats["secret"] += 1
                     label, _ = CHANNELS.get(item[1], ("?", FG))

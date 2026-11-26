@@ -877,7 +877,8 @@ class Launcher:
         if st:
             parts += ["win=%d" % bool(st.get("win")), "addon=%d" % bool(st.get("addon")),
                       "chat=%d" % int(st.get("chat", 0)), "tr=%d" % int(st.get("tr", 0)),
-                      "err=%d" % int(st.get("err", 0)), "nobal=%d" % int(st.get("nobal", 0))]
+                      "err=%d" % int(st.get("err", 0)), "nobal=%d" % int(st.get("nobal", 0)),
+                      "lost=%d" % int(st.get("lost", 0))]
         return ";".join(parts)
 
     def refresh_account(self):
