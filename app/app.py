@@ -627,6 +627,7 @@ class Relay:
         self.trial_claimed = None   # 领过没有；None = 还没查到
         self.trial_expires = None
         self.promo_bound = None     # 绑定过推广码没有；None = 还没查到
+        self.tickets_unread = 0     # 反馈工单里客服的回复，还没看过的条数（查余额 / 翻译的返回里顺带给）
 
     @property
     def own(self):
@@ -638,6 +639,8 @@ class Relay:
         return bool(self.cfg.get("token")) or self.own
 
     def _note_balance(self, data):
+        if isinstance(data, dict) and "tickets_unread" in data:
+            self.tickets_unread = int(data.get("tickets_unread") or 0)
         if isinstance(data, dict) and data.get("balance") is not None:
             self.balance, self.currency = data["balance"], data.get("currency", self.currency)
             if "trial_left" in data:
@@ -685,6 +688,41 @@ class Relay:
                 return None, "提交失败 %d" % e.code
         except Exception:
             return None, "连不上服务器"
+
+    def _error_of(self, e, what):
+        try:
+            return json.loads(e.read().decode("utf-8")).get("error") or "%s %d" % (what, e.code)
+        except Exception:
+            return "%s %d" % (what, e.code)
+
+    def tickets(self):
+        """我的反馈（工单）和客服回复。返回 (数据, 错误说明)。"""
+        try:
+            data = self._request("/tickets", timeout=8)
+            self.tickets_unread = int(data.get("unread") or 0)
+            return data, None
+        except urllib.error.HTTPError as e:
+            return None, self._error_of(e, "查不到")
+        except Exception:
+            return None, "连不上服务器"
+
+    def ticket_reply(self, tid, text):
+        """在工单里接着说。返回 (工单, 错误说明)。"""
+        try:
+            return self._request("/tickets/reply", {"id": tid, "text": text}, timeout=10).get("ticket"), None
+        except urllib.error.HTTPError as e:
+            return None, self._error_of(e, "没发出去")
+        except Exception:
+            return None, "连不上服务器"
+
+    def ticket_seen(self):
+        """看过了：客服回复的未读数清零。"""
+        try:
+            self._request("/tickets/seen", {}, timeout=8)
+            self.tickets_unread = 0
+        except Exception:
+            pass
+        return ()
 
     def _request(self, path, body=None, timeout=10, headers=None):
         url = self.cfg["endpoint"].rstrip("/") + path
@@ -947,7 +985,8 @@ class Overlay:
         self.hint_cover = tk.Frame(root, bg=GAME_BAR, highlightthickness=0, bd=0)
         # 插件在翻译页中间画的「翻译程序没开」提示卡：程序开着时用同色的卡盖住，写自己的状态
         self.card_cover = tk.Label(root, bg=GAME_BAR, fg=FG_DIM, font=(FONT, 10), justify="center",
-                                   text="翻译程序已连上\n等待游戏里的聊天…", highlightthickness=0, bd=0)
+                                   text="翻译程序已连上，等待聊天…\n综合 / 交易频道默认不翻，右键「翻译」按钮可以勾上",
+                                   highlightthickness=0, bd=0)
         self.grip = tk.Label(root, text="◢", bg=BG, fg="#4a4f59", font=(FONT, 8), cursor="size_nw_se")
         self.grip.bind("<Button-1>", self._resize_start)
         self.grip.bind("<B1-Motion>", self._resize_move)
@@ -984,7 +1023,8 @@ class Overlay:
         self.per_line = None
         threading.Thread(target=lambda: setattr(self, "per_line", self.relay.per_line()), daemon=True).start()
         root.after(300, lambda: self._append(
-            [("等待游戏里的聊天… 发消息：游戏聊天框里打中文，按 Ctrl+T。", "note")]))
+            [("等待游戏里的聊天… 综合 / 交易频道默认不翻，右键「翻译」按钮可以勾上。发消息：游戏聊天框里打中文，按 Ctrl+T。",
+              "note")]))
         root.after(50, self._pump)
         root.after(100, self._place)
         root.after(500, self._refresh_status)
@@ -1244,6 +1284,13 @@ class Overlay:
             time.sleep(20)
 
     # --- 界面更新 ---
+    def _tell_ticket(self):
+        """客服在工单里回复了（翻译的返回里带未读数）：翻译页里提示一次，每多一条新回复再提示一次。"""
+        unread = int(getattr(self.relay, "tickets_unread", 0) or 0)
+        if unread > getattr(self, "tickets_told", 0):
+            self._append([("客服回复了你的反馈：在电脑上的 ChatBridge 启动器里点「反馈问题」查看。", "out")])
+        self.tickets_told = unread
+
     def _append(self, pieces):
         """往翻译页加一条。pieces：[(文字, 标签), …]。别人说的话 / 译文 / 名字的标签里要带 RAW（见文件开头），
         程序自己的提示不带。"""
@@ -1342,6 +1389,7 @@ class Overlay:
             self._append(pieces)
             if err == NO_BALANCE:
                 self._tell_no_balance()
+            self._tell_ticket()
         elif kind == "hello":
             # 插件登录、过加载画面时会连着打好几次招呼；同一个角色和版本只提示一次
             self.stats["addon_ver"] = str(item[1])[:12]

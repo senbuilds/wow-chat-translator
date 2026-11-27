@@ -207,6 +207,30 @@ def addon_dir(game_dir, flavor):
     return os.path.join(game_dir, flavor, "Interface", "AddOns", ADDON)
 
 
+def disabled_characters(game_dir, flavor):
+    """哪些角色把 ChatBridge 关了（游戏退出时写的 WTF/Account/<账号>/<服>/<角色>/AddOns.txt 里 ChatBridge: disabled）。
+    返回角色名列表（文件夹名）。读不到就返回空。"""
+    found = []
+    base = os.path.join(game_dir or "", flavor or "", "WTF", "Account")
+    try:
+        for account in os.listdir(base):
+            for realm in os.listdir(os.path.join(base, account)):
+                rdir = os.path.join(base, account, realm)
+                if not os.path.isdir(rdir) or realm == "SavedVariables":
+                    continue
+                for char in os.listdir(rdir):
+                    path = os.path.join(rdir, char, "AddOns.txt")
+                    try:
+                        with open(path, encoding="utf-8", errors="replace") as f:
+                            if any(line.strip().lower() == ADDON.lower() + ": disabled" for line in f):
+                                found.append(char)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    return sorted(set(found))
+
+
 def version_key(v):
     return [int(p) if p.isdigit() else 0 for p in (v or "0").split(".")]
 
@@ -388,9 +412,17 @@ class Link(tk.Label):
 
     def __init__(self, parent, text, command, **kw):
         super().__init__(parent, text=text, bg=parent.cget("bg"), fg=TEXT, font=(FONT, 10), cursor="hand2", **kw)
-        self.command, self.enabled = command, True
+        self.command, self.enabled, self.alert = command, True, False
         self.bind("<Enter>", lambda e: self.enabled and self.configure(fg=GOLD))
-        self.bind("<Leave>", lambda e: self.configure(fg=TEXT if self.enabled else OFF_TEXT))
+        self.bind("<Leave>", lambda e: self.configure(fg=self._rest_color()))
+
+    def _rest_color(self):
+        return (BAD if self.alert else TEXT) if self.enabled else OFF_TEXT
+
+    def set_alert(self, on, text):
+        """红色角标（客服回复了反馈）。"""
+        self.alert = on
+        self.configure(text=text, fg=self._rest_color())
         self.bind("<ButtonRelease-1>", lambda e: self.enabled and self.command())
 
     def set(self, text=None, enabled=None):
@@ -591,6 +623,8 @@ class Launcher:
                 tk.Frame(bar, bg=LINE_SOFT, width=1, height=int(16 * k)).grid(row=0, column=n * 2 + 1)
             if label == "检查更新":
                 self.update_button = link
+            if label == "反馈问题":
+                self.feedback_link = link
 
         # --- 页脚：服务状态、版本 / 设备编号 ---
         foot = tk.Frame(body, bg=BG)
@@ -964,6 +998,15 @@ class Launcher:
             self._stuck_said = None
         waiting = phase in self.STUCK_TEXT
         stuck = waiting and time.time() - self._phase_since > self.STUCK_AFTER
+        if phase == "addon" and not getattr(self, "_disabled_said", False):
+            # 找到游戏了但没收到插件信号：先看是不是哪个角色把插件关了（这种不用等 3 分钟，直接说）
+            off = disabled_characters(self.game_dir, self.flavor.get())
+            if off and not self.cdk_msg.cget("text"):
+                self._disabled_said = True
+                self.say("角色 %s 没启用 ChatBridge 插件：在游戏里按 Esc → 插件，勾上 ChatBridge，再输入 /reload。"
+                         % "、".join(off[:3]), fg=WARN)
+        elif phase != "addon":
+            self._disabled_said = False
         self.run_dot.configure(fg=(WARN if waiting else GOOD) if on else DIM)
         self.run_label.configure(text=(self.STUCK_TEXT[phase][0] if waiting else "翻译运行中") if on else "未启动")
         if stuck and not self._stuck_said and not self.cdk_msg.cget("text"):
@@ -1314,12 +1357,14 @@ class Launcher:
         text = tk.Text(box, bg=FIELD, fg=TEXT, insertbackground=GOLD, relief="flat", font=(FONT, 10),
                        width=46, height=6, wrap="word")
         text.pack(fill="x", padx=1, pady=1)
-        contact = self.field(body, "邮箱（选填，方便我们回复你）")
+        contact = None                     # 不再要邮箱：客服在这里（工单里）回复
         with_diag = tk.BooleanVar(value=True)
         tk.Checkbutton(body, text="附带诊断信息：版本、游戏和插件的连接情况、各频道收到的消息数。不含聊天内容和角色名。",
                        variable=with_diag, bg=BG, fg=TEXT, selectcolor=FIELD, activebackground=BG,
                        activeforeground=GOLD, font=(FONT, 9), anchor="w", wraplength=wrap,
                        justify="left").pack(fill="x", pady=(8, 0))
+        tk.Label(body, text="我们会在 48 小时内在这里回复你。有回复时，启动器的「反馈问题」会变红，游戏里的翻译页也会提示。",
+                 bg=BG, fg=GOLD, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap).pack(fill="x", pady=(8, 0))
         msg = tk.Label(body, text="", bg=BG, fg=DIM, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
         msg.pack(fill="x", pady=(6, 0))
         row = tk.Frame(body, bg=BG)
@@ -1330,13 +1375,8 @@ class Launcher:
             if len(content) < 2:
                 msg.configure(text="请写一下遇到了什么问题。", fg=BAD)
                 return
-            email = contact.get().strip()
-            if email and not EMAIL_RE.match(email):
-                msg.configure(text="邮箱格式不对（不想留可以空着）。", fg=BAD)
-                return
             code = next((c for c, label in FEEDBACK_KINDS if i18n.t(label) == kind.get()), "other")
-            payload = {"kind": code, "text": content[:2000], "contact": email[:120],
-                       "version": APP_VERSION}
+            payload = {"kind": code, "text": content[:2000], "version": APP_VERSION}
             if with_diag.get():
                 payload["diag"] = self.diagnostics()
             send_button.set(enabled=False)
@@ -1351,14 +1391,95 @@ class Launcher:
         self.center(win)
         text.focus_set()
         self.feedback_win = win
+        self.background("tickets_loaded", lambda: self.relay.tickets() + (win, body, msg))
         return win, text, contact, msg
+
+    # --- 我的反馈（工单）：客服的回复显示在反馈窗口上方，可以接着回 ---
+    def show_ticket_badge(self):
+        link = getattr(self, "feedback_link", None)
+        if link is None:
+            return
+        n = int(getattr(self.relay, "tickets_unread", 0) or 0)
+        link.set_alert(n > 0, "反馈问题 ●%d" % n if n else "反馈问题")
+
+    def on_tickets_loaded(self, data, err, win, body, msg):
+        if not win.winfo_exists() or not data or not data.get("tickets"):
+            return
+        k, wrap = self.k, int(380 * self.k)
+        tickets = data["tickets"]
+        box = tk.Frame(body, bg=BG)
+        box.pack(fill="x", before=body.winfo_children()[1], pady=(0, int(6 * k)))
+        tk.Label(box, text="我的反馈", bg=BG, fg=TEXT, font=(FONT, 10, "bold"), anchor="w").pack(fill="x")
+        frame = tk.Frame(box, bg=EDGE, padx=1, pady=1)
+        frame.pack(fill="x", pady=(2, 0))
+        log = tk.Text(frame, bg=FIELD, fg=TEXT, relief="flat", font=(FONT, 9), width=46, height=8, wrap="word",
+                      padx=6, pady=4, cursor="arrow")
+        log.pack(fill="x", padx=1, pady=1)
+        log.tag_configure("head", foreground=DIM, font=(FONT, 8))
+        log.tag_configure("user", foreground=TEXT)
+        log.tag_configure("staff", foreground=GOLD)
+        log.tag_configure("new", foreground=BAD, font=(FONT, 8, "bold"))
+        kinds = dict(FEEDBACK_KINDS)
+        for t in tickets[:6]:
+            when = time.strftime("%m-%d %H:%M", time.localtime(t["created"]))
+            log.insert("end", "#%s · %s · %s\n" % (t["id"], i18n.t(kinds.get(t["kind"], "其他")), when), "head")
+            for m in t["msgs"]:
+                who = "客服" if m["who"] == "staff" else "我"
+                log.insert("end", "%s：" % who, "staff" if m["who"] == "staff" else "user")
+                log.insert("end", m["text"].strip() + "\n", "staff" if m["who"] == "staff" else "user")
+            if t.get("unread"):
+                log.insert("end", "（新回复）\n", "new")
+            log.insert("end", "\n")
+        log.configure(state="disabled")
+        latest = tickets[0]
+        row = tk.Frame(box, bg=BG)
+        row.pack(fill="x", pady=(4, 0))
+        tk.Label(row, text="接着说（#%s）" % latest["id"], bg=BG, fg=DIM, font=(FONT, 9)).pack(side="left")
+        entry_box = tk.Frame(row, bg=EDGE, padx=1, pady=1)
+        entry_box.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        entry = tk.Entry(entry_box, bg=FIELD, fg=TEXT, insertbackground=GOLD, relief="flat", font=(FONT, 10))
+        entry.pack(fill="x", ipady=3, padx=1)
+
+        def reply():
+            text = entry.get().strip()
+            if not text:
+                return
+            button.set(enabled=False)
+            msg.configure(text="正在发送…", fg=DIM)
+            self.background("ticket_replied", lambda: self.relay.ticket_reply(latest["id"], text) + (win, msg, entry, button, log))
+
+        button = WowButton(row, "回复", reply, width=5)
+        button.pack(side="right")
+        entry.bind("<Return>", lambda e: reply())
+        tk.Frame(box, bg=LINE_SOFT, height=1).pack(fill="x", pady=(int(10 * k), 0))
+        tk.Label(box, text="提新的问题", bg=BG, fg=TEXT, font=(FONT, 10, "bold"), anchor="w").pack(fill="x", pady=(int(6 * k), 0))
+        win.update_idletasks()
+        win.geometry("")
+        if data.get("unread"):
+            threading.Thread(target=self.relay.ticket_seen, daemon=True).start()
+            self.relay.tickets_unread = 0
+            self.show_ticket_badge()
+
+    def on_ticket_replied(self, ticket, err, win, msg, entry, button, log):
+        if not win.winfo_exists():
+            return
+        button.set(enabled=True)
+        if not ticket:
+            msg.configure(text="没发出去：%s" % err, fg=BAD)
+            return
+        m = ticket["msgs"][-1]
+        log.configure(state="normal")
+        log.insert("1.0", "我：%s\n" % m["text"].strip(), "user")
+        log.configure(state="disabled")
+        entry.delete(0, "end")
+        msg.configure(text="已发送，我们会在 48 小时内回复。", fg=GOOD)
 
     def on_feedback_sent(self, fid, err, win, msg, button):
         if not win.winfo_exists():
             return
         if fid:
-            msg.configure(text="已收到，编号 %s。留了邮箱的话，我们会回复你。" % fid, fg=GOOD)
-            win.after(3000, win.destroy)
+            msg.configure(text="已收到，编号 %s。我们会在 48 小时内在「反馈问题」里回复你。" % fid, fg=GOOD)
+            win.after(4000, win.destroy)
         else:
             button.set(enabled=True)
             msg.configure(text="没发出去：%s" % err, fg=BAD)
@@ -1642,8 +1763,13 @@ class Launcher:
     def handle_event(self, item):
         if item[0] == "account":
             self.show_balance()
+            self.show_ticket_badge()
         elif item[0] == "update_info":
             self.on_update_info(*item[1:])
+        elif item[0] == "tickets_loaded":
+            self.on_tickets_loaded(*item[1:])
+        elif item[0] == "ticket_replied":
+            self.on_ticket_replied(*item[1:])
         elif item[0] == "update_progress":
             done, total = item[1], item[2]
             pct = (" %d%%" % (done * 100 // total)) if total else ""

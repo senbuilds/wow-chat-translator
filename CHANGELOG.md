@@ -3,6 +3,13 @@
 程序安装包在官网下载：<https://wow.husen.ca>（启动器里点「检查更新」可以直接升级）。游戏插件也在 [CurseForge](https://www.curseforge.com/wow/addons/chatbridge-translator)。
 日期按 UTC。
 
+## 1.4.3 · 插件 2.12（2026-11-28）
+- 「反馈问题」变成工单：不用再留邮箱。我们会在 48 小时内在这里回复；有回复时，启动器的「反馈问题」会变红，游戏里的翻译页也会提示。看到回复后可以接着说。以前在程序里提交过的反馈也能看到回复。
+- 哪个角色没启用 ChatBridge 插件，启动器会直接说是哪个角色、怎么打开。
+- 翻译页等待聊天时说明：综合 / 交易频道默认不翻，右键「翻译」按钮可以勾上。
+- 插件：切出游戏时露出来的提示卡不再一口咬定「翻译程序没开」。
+- Feedback is now a ticket: no e-mail needed; we reply inside the app within 48 hours (the launcher and the in-game page tell you). The launcher names any character with the addon disabled.
+
 ## 1.4.2 · 插件 2.11（2026-11-27）
 - 翻译页里能看到自己说的话了：用 Ctrl+T 发的，显示你打的中文和发出去的英文；直接打的字原样显示。自己的话不送去翻译，不算条数。
 - 启动器会显示翻译接上游戏没有：还没找到游戏窗口时显示「等游戏打开」，找到了但没收到插件信号时显示「等插件信号」。超过 3 分钟还接不上，会提示该怎么办。

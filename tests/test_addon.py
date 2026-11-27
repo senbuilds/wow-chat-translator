@@ -407,8 +407,8 @@ def main():
 
     # 版本号：插件和 toc 一致
     with open(os.path.join(ROOT, "addon", "ChatBridge", "ChatBridge.toc"), encoding="utf-8") as f:
-        assert "## Version: 2.11\n" in f.read()
-    assert lua.eval("ChatBridge.VERSION") == b"2.11"
+        assert "## Version: 2.12\n" in f.read()
+    assert lua.eval("ChatBridge.VERSION") == b"2.12"
 
     # 1) 发话时的链接占位符：新引擎的 |cnIQ4: 颜色写法和老的 |cff…… 都认，编号按出现顺序
     newstyle = "|cnIQ4:|Hitem:19019::::::::70:::::|h[雷霆之怒]|h|r"
@@ -645,7 +645,7 @@ def main():
     lua.eval("ChatBridge.Announce")()
     before = len(seen)
     pump(5.0)
-    assert out(before) == ["@\t2.11\tSenhu"] * 2, out(before)      # 位置发不了，「我在线」照发
+    assert out(before) == ["@\t2.12\tSenhu"] * 2, out(before)      # 位置发不了，「我在线」照发
     lua.execute(b"ChatBridge.PageRect = realPageRect; "
                 b"for _, f in ipairs(frames) do if f.name == 'ChatBridgePanel' then f.l = 210 end end")
     pump(1.0)

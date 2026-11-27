@@ -10,7 +10,7 @@
 ChatBridge = {}
 local CB = ChatBridge
 
-CB.VERSION = "2.11"
+CB.VERSION = "2.12"
 CB.COLS, CB.ROWS, CB.CELL, CB.HEADER = 64, 8, 4, 8
 CB.MAX_PAYLOAD = math.floor((CB.COLS * CB.ROWS - CB.HEADER) * 6 / 8) - 5
 CB.HOLD = 0.25          -- 每条消息的色块显示秒数
@@ -779,12 +779,13 @@ local function buildPage()
     cardBg:SetColorTexture(0.10, 0.12, 0.16, 1)
     local cardTitle = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     cardTitle:SetPoint("TOP", card, "TOP", 0, -9)
-    cardTitle:SetText(L("翻译程序没开"))
+    cardTitle:SetText(L("翻译程序没开？"))
     local cardText = card:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     cardText:SetPoint("TOP", cardTitle, "BOTTOM", 0, -5)
     cardText:SetPoint("LEFT", card, "LEFT", 8, 0)
     cardText:SetPoint("RIGHT", card, "RIGHT", -8, 0)
-    cardText:SetText(L("去 wow.husen.ca 下载电脑程序，打开后点「启动」"))
+    -- 游戏不在前台（切出去打字）时程序会把遮片藏起来，这张卡就露出来了：别说死「没开」
+    cardText:SetText(L("开着的话切回游戏就会显示；还没装去 wow.husen.ca 下载"))
     CB.card = card
 
     -- 滚轮翻看之前的译文（译文由小程序显示，这里把滚动转给它）
