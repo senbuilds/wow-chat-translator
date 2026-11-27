@@ -804,6 +804,23 @@ def backlog_skip(waiting, waited):
 PASTE_MAX_WAIT = 6.0        # 按下 Ctrl+T 超过这么久译文才回来：你多半已经在干别的了，只复制、不替你按键
 
 
+ME_MARK = "\x1e"       # 插件在自己说的话的名字后面带的记号：名字 \x1f 职业色 \x1e（插件 2.11 起）
+SENT_KEEP = 180        # 你按 Ctrl+T 翻出来的英文，多久以内在聊天里出现还算「就是这一句」（秒）
+
+
+def sent_key(text):
+    """比对「你发出去的话」和「Ctrl+T 翻出来的英文」用：不看大小写、空白、物品链接（发出去时占位符已经换成了 [名字]）。"""
+    text = re.sub(r"\{\d+\}|\[[^\[\]]*\]", "", text)
+    return re.sub(r"\s+", "", text).lower()
+
+
+def split_me(sender):
+    """返回 (去掉记号的发言人, 是不是自己)。"""
+    if "\x1f" in sender and sender.endswith(ME_MARK):
+        return sender[:-1].rstrip("\x1f") if sender[:-1].endswith("\x1f") else sender[:-1], True
+    return sender, False
+
+
 def outgoing_action(seq, latest, waited, translated):
     """Ctrl+T 的译文回来以后怎么办。seq：这次的序号；latest：最新一次 Ctrl+T 的序号；waited：从按下到现在几秒。
     drop = 你后来又按了一次，这次作废（不复制、不粘贴，免得旧的一句盖掉剪贴板或贴两遍）；fail = 没翻出来；
@@ -877,6 +894,7 @@ class Overlay:
     def __init__(self, cfg):
         self.cfg = cfg
         self.relay = Relay(cfg)
+        self.sent_log = collections.deque(maxlen=8)      # 最近几次 Ctrl+T：(英文的比对键, 中文原文, 时间)
         self.recent = RecentChat()       # 队伍类频道刚才的几句，翻下一句时当前文
         self.frames = queue.Queue()      # 抓屏线程 -> 分发线程（分发线程不做慢事，这里不会积压）
         self.chats = queue.Queue()       # 分发线程 -> 翻译线程：收到的聊天，按到达顺序
@@ -1129,6 +1147,9 @@ class Overlay:
             for mark in re.findall(r"\{\d+\}", text):
                 if mark not in english:
                     english = english.rstrip() + " " + mark
+        if english and english != text:
+            # 记下「这句中文翻成了这句英文」：等它真的发出去、从聊天里回来时，翻译页上把你的原话配在旁边
+            self.sent_log.append((sent_key(english), text, time.monotonic()))
         self.ui.put(("sent", english, err, seq, started))
 
     def _dispatch_loop(self):
@@ -1176,18 +1197,24 @@ class Overlay:
         else:
             # 收到的聊天。前文在这里处理（这里是按到达顺序的）：先取这一句之前的前文，再把这一句记进去。
             # 不翻的也走同一个队列，翻译页里才能保持到达顺序。
-            need = needs_translation(text)
+            sender, me = split_me(sender)
+            mine = None                               # 自己的话：None = 不是自己；"" = 是自己；中文 = 是自己，而且是这句中文用 Ctrl+T 翻出来的
+            if me:
+                # 自己说的话不送去翻译、不扣额度，只是显示出来（一场对话里得看得到自己说了什么）。
+                key, now = sent_key(text), time.monotonic()
+                mine = next((zh for k, zh, at in reversed(self.sent_log) if k == key and now - at <= SENT_KEEP), "")
+            need = not me and needs_translation(text)
             context = self.recent.before(code, sender) if need else None
             self.recent.add(code, sender, text)
             if need:
                 with self.chat_lock:
                     self.chat_waiting += 1
-            self.chats.put((time.monotonic(), code, sender, text, need, context))
+            self.chats.put((time.monotonic(), code, sender, text, need, context, mine))
 
     def _chat_loop(self):
         """翻译线程：一条一条翻收到的聊天。只有这一个线程，所以翻译页里的顺序就是到达顺序。"""
         while True:
-            arrived, code, sender, text, need, context = self.chats.get()
+            arrived, code, sender, text, need, context, mine = self.chats.get()
             translated = err = None
             try:
                 if need:
@@ -1198,7 +1225,7 @@ class Overlay:
                         translated, err = self.relay.translate(text, "en2zh", context)
             except Exception:
                 log_error("翻译")
-            self.ui.put(("chat", code, sender, text, translated, err))
+            self.ui.put(("chat", code, sender, text, translated, err, mine))
 
     def _health_loop(self):
         checked = 0.0
@@ -1271,7 +1298,8 @@ class Overlay:
         if kind != "dock":
             self.game_seen = True
         if kind == "chat":
-            _, code, sender, text, translated, err = item
+            _, code, sender, text, translated, err = item[:6]
+            mine = item[6] if len(item) > 6 else None
             label, _ = CHANNELS.get(code, ("?", FG))
             name_tag = "name"
             if "\x1f" in sender:              # 插件带来了职业颜色：名字 \x1f rrggbb
@@ -1279,6 +1307,16 @@ class Overlay:
                 if len(hexcolor) == 6 and all(c in "0123456789abcdefABCDEF" for c in hexcolor):
                     name_tag = "cls" + hexcolor.lower()
                     self.log.tag_configure(name_tag, foreground="#" + hexcolor.lower())
+            if mine is not None:
+                # 自己说的话：不算进「收到的聊天」统计。用 Ctrl+T 翻的，上面一行是你打的中文、下面一行是发出去的英文；
+                # 直接打的字就原样一行。
+                pieces = [("[%s] " % label, "ch" + code), (sender, (name_tag, RAW)), (": ", "name")]
+                if mine:
+                    pieces += [(chat_glyph(mine) + "\n", (RAW,)), (text + "\n", ("orig", RAW))]
+                else:
+                    pieces.append((chat_glyph(text) + "\n", (RAW,)))
+                self._append(pieces)
+                return
             st = self.stats
             st["chat"] += 1
             st["last_chat"] = int(time.time())

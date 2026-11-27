@@ -251,13 +251,14 @@ def main():
         assert len(seen) == before + 1, (event, seen[before:])
         assert seen[-1][1] == expect.encode(), (seen[-1][1].decode(errors="replace"), expect)
 
-    # 自己说的话、公共频道（默认关）、空文本都不该发
+    # 公共频道（默认关）、空文本都不该发；自己说的话要发，名字后面带「这是我」的记号（\x1f 职业色 \x1e）
     before = len(seen)
     fire(b"CHAT_MSG_SAY", b"my own line", b"Senhu-Ethereum")
     fire(b"CHAT_MSG_CHANNEL", b"WTS stuff", b"Trader")
     fire(b"CHAT_MSG_SAY", b"|T123:0|t", b"Icon")
     pump(0.6)
-    assert len(seen) == before, seen[before:]
+    assert [p for _, p in seen[before:]] == [b"S\tSenhu\x1f\x1e\tmy own line"], seen[before:]
+    before = len(seen)
 
     # 秘密值：只发「读不到」的通知，10 秒内只发一次
     lua.execute(b'secrets["SECRETTEXT"] = true')
@@ -406,8 +407,8 @@ def main():
 
     # 版本号：插件和 toc 一致
     with open(os.path.join(ROOT, "addon", "ChatBridge", "ChatBridge.toc"), encoding="utf-8") as f:
-        assert "## Version: 2.10\n" in f.read()
-    assert lua.eval("ChatBridge.VERSION") == b"2.10"
+        assert "## Version: 2.11\n" in f.read()
+    assert lua.eval("ChatBridge.VERSION") == b"2.11"
 
     # 1) 发话时的链接占位符：新引擎的 |cnIQ4: 颜色写法和老的 |cff…… 都认，编号按出现顺序
     newstyle = "|cnIQ4:|Hitem:19019::::::::70:::::|h[雷霆之怒]|h|r"
@@ -567,14 +568,17 @@ def main():
     say(b"mine by guid", b"Senhu-Ethereum", b"Player-1-ME")
     say(b"mine by name", b"Senhu-Ethereum")
     say(b"hello", b"Other", b"Player-3-X")
-    pump(1.0)
-    assert out(before) == ["S\tSenhu\tsame name other realm", "S\tOther\thello"], out(before)
+    pump(1.6)
+    raw = out(before)
+    assert raw == ["S\tSenhu\tsame name other realm", "S\tSenhu\x1f\x1e\tmine by guid",
+                   "S\tSenhu\x1f\x1e\tmine by name", "S\tOther\thello"], raw   # 同名别人不带记号，自己的两句都带
     lua.execute(b'secrets["Player-1-ME"] = true')         # 自己的 GUID 读出来是秘密值：不拿它比，退回比名字
     before = len(seen)
     say(b"x", b"Senhu-Ethereum", b"Player-2-OTHER")
     say(b"y", b"Other", b"Player-3-X")
     pump(1.0)
-    assert out(before) == ["S\tOther\ty"], out(before)
+    raw = out(before)
+    assert raw == ["S\tSenhu\x1f\x1e\tx", "S\tOther\ty"], raw
     lua.execute(b'secrets["Player-1-ME"] = nil')
 
     # 7) 临时聊天窗口（ChatFrame11 起）也要挂上 Ctrl+T：游戏开临时窗口后再挂一遍
@@ -641,7 +645,7 @@ def main():
     lua.eval("ChatBridge.Announce")()
     before = len(seen)
     pump(5.0)
-    assert out(before) == ["@\t2.10\tSenhu"] * 2, out(before)      # 位置发不了，「我在线」照发
+    assert out(before) == ["@\t2.11\tSenhu"] * 2, out(before)      # 位置发不了，「我在线」照发
     lua.execute(b"ChatBridge.PageRect = realPageRect; "
                 b"for _, f in ipairs(frames) do if f.name == 'ChatBridgePanel' then f.l = 210 end end")
     pump(1.0)

@@ -10,7 +10,7 @@
 ChatBridge = {}
 local CB = ChatBridge
 
-CB.VERSION = "2.10"
+CB.VERSION = "2.11"
 CB.COLS, CB.ROWS, CB.CELL, CB.HEADER = 64, 8, 4, 8
 CB.MAX_PAYLOAD = math.floor((CB.COLS * CB.ROWS - CB.HEADER) * 6 / 8) - 5
 CB.HOLD = 0.25          -- 每条消息的色块显示秒数
@@ -357,20 +357,22 @@ local function onChat(event, text, sender, guid, bnSenderID)
     end
     if type(text) ~= "string" or text == "" then return end
 
-    -- 自己说的话不用翻。优先用 GUID 认人：只比名字的话，跨服同名的别人也会被当成自己、他的话就不翻了。
+    -- 自己说的话不用翻，但要照样发给电脑程序：翻译页里得看得到自己说了什么，不然一场对话只剩别人的话。
+    -- 发的时候在名字后面带一个「这是我」的记号（见下面入队处），电脑程序看到记号就不送去翻译、不扣额度。
+    -- 认自己优先用 GUID：只比名字的话，跨服同名的别人也会被当成自己。
     -- 拿不到 GUID（消息没带、老客户端没有 UnitGUID、是秘密值）时才退回下面的比名字。
     local myGuid
     if UnitGUID and not isSecret(guid) and type(guid) == "string" and guid ~= "" then
         local ok, mine = pcall(UnitGUID, "player")
         if ok and not isSecret(mine) and type(mine) == "string" and mine ~= "" then myGuid = mine end
     end
-    if myGuid and guid == myGuid then return end
+    local isMe = (myGuid ~= nil and guid == myGuid)
 
     local name = "?"
     if code == "B" then name = bnName(bnSenderID) or "?" end
     if name == "?" and not isSecret(sender) and type(sender) == "string" and sender ~= "" then
         name = Ambiguate and Ambiguate(sender, "short") or sender
-        if not myGuid and name == UnitName("player") then return end -- 没有 GUID 可比时的老办法
+        if not myGuid and name == UnitName("player") then isMe = true end -- 没有 GUID 可比时的老办法
         name = CB.StripEscapes(name)
         if name == "" then name = "?" end
     end
@@ -396,8 +398,14 @@ local function onChat(event, text, sender, guid, bnSenderID)
     -- 小程序可能是进游戏以后才启动的，错过了加载时发的那次
     if CB.RefreshRectIfStale then CB.RefreshRectIfStale() end
     local hex = classHex(guid)
-    if hex and name ~= "?" then name = name .. "\031" .. hex end
+    if isMe then
+        -- 「这是我」的记号：名字 \031 职业色（可以空着）\030。旧版电脑程序不认识 \030，只会当成没有职业色，名字照常显示。
+        name = name .. "\031" .. (hex or "") .. "\030"
+    elseif hex and name ~= "?" then
+        name = name .. "\031" .. hex
+    end
     CB.Enqueue(code .. "\t" .. name .. "\t" .. clean)
+    if isMe then return end           -- 自己的话不算「有新消息」：不点亮按钮上的未读数
     if CB.NoteIncoming then CB.NoteIncoming() end
     ChatBridgeDB.lastChatAt = time and time() or nil
     if not CB.sawChat then

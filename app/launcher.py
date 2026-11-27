@@ -935,21 +935,54 @@ class Launcher:
         self.proc = None
         self.tick_once()
 
+    # 翻译开着但还没接上游戏的两种情况，等多久以后给一句怎么办的提示（秒）
+    STUCK_AFTER = 180
+    STUCK_TEXT = {
+        "win": ("等游戏打开", "游戏开着？看下面提示",
+                "翻译开着，但一直没找到游戏窗口。\n游戏没开就先打开；已经开着还这样，请点下面的「反馈问题」。"),
+        "addon": ("等插件信号", "还是这样？看下面提示",
+                  "找到游戏了，但没收到插件的信号。刚装的插件要完全退出游戏再进。\n"
+                  "还不行，就在角色选择界面的「插件」里确认 ChatBridge 已勾选。"),
+    }
+
+    def link_phase(self):
+        """翻译进程接上游戏没有：None = 没在跑或刚启动还没状态；"win" = 没找到游戏窗口；"addon" = 找到窗口但没收到插件信号；"ok"。"""
+        st = self.read_status()
+        if not st:
+            return None
+        if not st.get("win"):
+            return "win"
+        return "ok" if st.get("addon") else "addon"
+
     def tick_once(self):
         on = self.running()
-        self.run_dot.configure(fg=GOOD if on else DIM)
-        self.run_label.configure(text="翻译运行中" if on else "未启动")
+        phase = self.link_phase() if on else None
+        if phase != getattr(self, "_phase", None):          # 换了阶段重新计时，并收起上一个阶段的长提示
+            self._phase, self._phase_since = phase, time.time()
+            if getattr(self, "_stuck_said", None) and self.cdk_msg.cget("text") == i18n.t(self._stuck_said):
+                self.say("")
+            self._stuck_said = None
+        waiting = phase in self.STUCK_TEXT
+        stuck = waiting and time.time() - self._phase_since > self.STUCK_AFTER
+        self.run_dot.configure(fg=(WARN if waiting else GOOD) if on else DIM)
+        self.run_label.configure(text=(self.STUCK_TEXT[phase][0] if waiting else "翻译运行中") if on else "未启动")
+        if stuck and not self._stuck_said and not self.cdk_msg.cget("text"):
+            # 先开翻译、后开游戏是正常用法，所以前 3 分钟只显示「等游戏打开」；一直接不上才说怎么办。
+            # 提示行正被别的消息（兑换结果等）占着时先不抢，下一秒再看。
+            self._stuck_said = self.STUCK_TEXT[phase][2]
+            self.say(self._stuck_said, fg=WARN)
         if on != getattr(self, "_shown_on", None):          # 启动 / 停止只显示一个
             self._shown_on = on
             self.refit()
             (self.start_button if on else self.stop_button).pack_forget()
             (self.stop_button if on else self.start_button).pack(side="right")
         if on:
-            self.run_hint.configure(text="窗口可以最小化，别关")
+            self.run_hint.configure(text=self.STUCK_TEXT[phase][1] if stuck else "窗口可以最小化，别关")
         elif self.proc is not None:
             self.proc = None
             self.run_hint.configure(text="已停止，下次玩之前再点「启动」")
-        elif not self.run_hint.cget("text") or self.run_hint.cget("text") == i18n.t("窗口可以最小化，别关"):
+        elif (not self.run_hint.cget("text") or self.run_hint.cget("text") == i18n.t("窗口可以最小化，别关")
+              or self.run_hint.cget("text") in [i18n.t(v[1]) for v in self.STUCK_TEXT.values()]):
             self.run_hint.configure(text="每次玩之前点「启动」")
 
     def again(self, ms, fn):

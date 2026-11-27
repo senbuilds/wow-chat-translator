@@ -3,6 +3,11 @@
 程序安装包在官网下载：<https://wow.husen.ca>（启动器里点「检查更新」可以直接升级）。游戏插件也在 [CurseForge](https://www.curseforge.com/wow/addons/chatbridge-translator)。
 日期按 UTC。
 
+## 1.4.2 · 插件 2.11（2026-11-27）
+- 翻译页里能看到自己说的话了：用 Ctrl+T 发的，显示你打的中文和发出去的英文；直接打的字原样显示。自己的话不送去翻译，不算条数。
+- 启动器会显示翻译接上游戏没有：还没找到游戏窗口时显示「等游戏打开」，找到了但没收到插件信号时显示「等插件信号」。超过 3 分钟还接不上，会提示该怎么办。
+- Your own messages now show in the translation page (not translated, not counted). The launcher shows whether the translator has found the game window and the addon, and tells you what to do if it stays stuck.
+
 ## 1.4.1 · 插件 2.10（2026-11-27）
 - 繁体：译文和队友的原话不再被台湾用词表重复替换（之前 gnome 会显示成「哥布林」、troll 显示成「食人妖」）。
 - 按 Ctrl+T 发话不用再排在收到的消息后面；聊天刷屏时也不会把你要发的那句丢掉。

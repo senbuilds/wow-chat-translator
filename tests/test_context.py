@@ -193,8 +193,8 @@ check([r[3] for r in rows] == ["line number %d" % i for i in range(20)], "积压
 check([r[4] is None for r in rows] == [True] * 8 + [False] * 12 and all(r[5] is None for r in rows),
       "积压 20 条：前 8 条只显示原文（不报错），剩下 12 条照常翻")
 o.chat_waiting = 1
-o.chats.put((app.time.monotonic() - 9, "S", "Bob", "old line", True, None))
-check(drain(o, 1)[0][3:] == ("old line", None, None) and o.chat_waiting == 0, "等了超过 8 秒的那条：只显示原文")
+o.chats.put((app.time.monotonic() - 9, "S", "Bob", "old line", True, None, None))
+check(drain(o, 1)[0][3:6] == ("old line", None, None) and o.chat_waiting == 0, "等了超过 8 秒的那条：只显示原文")
 
 # ---------------------------------------------------------------------------
 # Ctrl+T：序号、太慢只复制
@@ -281,4 +281,12 @@ check(DownOwn(own2).translate("hi", "en2zh") == (None, "自带模型：密钥不
 DownOwn.code = 400
 check(DownOwn(own2).translate("hi", "en2zh")[1].startswith("自带模型出错 400（") and ("http://own.test/v1", "m2") not in app._own_alt_style,
       "换了写法还是 400：报出来，不记成「要用另一种写法」")
+
+# 自己说的话：插件在名字后面带记号，程序认出来以后不翻译，并和 Ctrl+T 的中文原文配对
+check(app.split_me("Senhu\x1f\x1e") == ("Senhu", True), "自己的话（没有职业色）：认出来，名字去掉记号")
+check(app.split_me("Senhu\x1fc79c6e\x1e") == ("Senhu\x1fc79c6e", True), "自己的话（带职业色）：认出来，职业色留着")
+check(app.split_me("Mate\x1fc79c6e") == ("Mate\x1fc79c6e", False) and app.split_me("Mate") == ("Mate", False), "别人的话：不是自己")
+check(app.sent_key("WTS {1} 50g, pst") == app.sent_key("wts [奥金斧] 50g,  pst"), "配对不看大小写、空白和物品链接")
+check(app.sent_key("wait, oom") != app.sent_key("wait, oom now"), "改过内容的不算同一句")
+check(app.RecentChat._name("Senhu\x1fc79c6e\x1e") == "Senhu", "带记号的名字进前文时也是干净的")
 print("全部通过：%d 项" % n)
