@@ -1339,35 +1339,240 @@ class Launcher:
         return d
 
     def open_feedback(self):
+        """反馈窗口：两页。「我的反馈」：每条反馈（工单）一行，点开看这一条的对话、单独回复；「提新问题」：新开一条。"""
         win, body = self.dialog("反馈问题")
-        wrap = int(380 * self.k)
-        tk.Label(body, text="说说遇到的问题，或者想要的功能。", bg=BG, fg=DIM, font=(FONT, 9),
-                 anchor="w").pack(fill="x")
-        tk.Label(body, text="问题类型", bg=BG, fg=TEXT, font=(FONT, 9), anchor="w").pack(fill="x", pady=(8, 2))
+        k, wrap = self.k, int(380 * self.k)
+        st = {"tickets": [], "sel": None, "page": None}
+
+        # --- 两个标签 ---
+        tabs = tk.Frame(body, bg=BG)
+        tabs.pack(fill="x")
+        tk.Frame(body, bg=LINE_SOFT, height=1).pack(fill="x")
+        tab_widgets = {}
+        for key, label in (("list", "我的反馈"), ("new", "提新问题")):
+            cell = tk.Frame(tabs, bg=BG)
+            cell.pack(side="left", padx=(0, int(18 * k)))
+            lab = tk.Label(cell, text=label, bg=BG, fg=DIM, font=(FONT, 11, "bold"), cursor="hand2")
+            lab.pack(pady=(int(4 * k), int(4 * k)))
+            bar = tk.Frame(cell, bg=BG, height=max(2, int(2 * k)))
+            bar.pack(fill="x")
+            lab.bind("<ButtonRelease-1>", lambda e, key=key: show(key))
+            tab_widgets[key] = (lab, bar)
+        pages = {"list": tk.Frame(body, bg=BG), "new": tk.Frame(body, bg=BG)}
+
+        def fit_text(*labels):                        # 说明文字按实际宽度换行，行尾不留孤零零的一两个字
+            def refit(e):
+                want = max(50, e.width - 4)
+                if abs(int(e.widget.cget("wraplength") or 0) - want) > 8:      # 只在宽度真变了时改，免得来回触发
+                    e.widget.configure(wraplength=want)
+            for lab in labels:
+                lab.bind("<Configure>", refit)
+
+        def show(key):
+            if st["page"] == key:
+                return
+            if not st.get("width"):                   # 两页一样宽：切换时窗口不跳
+                win.update_idletasks()
+                st["width"] = max(p.winfo_reqwidth() for p in pages.values())
+                for p in pages.values():
+                    tk.Frame(p, bg=BG, width=st["width"], height=0).pack(side="bottom")
+            st["page"] = key
+            for name, page in pages.items():
+                page.pack_forget()
+                lab, bar = tab_widgets[name]
+                lab.configure(fg=WHITE if name == key else DIM)
+                bar.configure(bg=GOLD if name == key else BG)
+            pages[key].pack(fill="both", expand=True, pady=(int(10 * k), 0))
+            win.update_idletasks()
+            win.geometry("")
+            if key == "new":
+                text.focus_set()
+
+        # --- 「我的反馈」：列表 + 选中那条的对话 + 回复 ---
+        lp = pages["list"]
+        list_note = tk.Label(lp, text="正在读取…", bg=BG, fg=DIM, font=(FONT, 9), anchor="w", justify="left",
+                             wraplength=wrap)
+        list_note.pack(fill="x")
+        frame = tk.Frame(lp, bg=EDGE, padx=1, pady=1)
+        frame.pack(fill="x", pady=(int(4 * k), 0))
+        rows = tk.Listbox(frame, bg=FIELD, fg=TEXT, selectbackground=CARD_LINE, selectforeground=WHITE,
+                          highlightthickness=0, relief="flat", activestyle="none", font=(FONT, 10), height=5,
+                          exportselection=False)
+        rows.pack(side="left", fill="both", expand=True, padx=1, pady=1)
+        bar = tk.Scrollbar(frame, orient="vertical", command=rows.yview)
+        rows.configure(yscrollcommand=bar.set)
+        tk.Label(lp, text="对话", bg=BG, fg=DIM, font=(FONT, 9), anchor="w").pack(fill="x", pady=(int(8 * k), 2))
+        lf = tk.Frame(lp, bg=EDGE, padx=1, pady=1)
+        lf.pack(fill="x")
+        log = tk.Text(lf, bg=FIELD, fg=TEXT, relief="flat", font=(FONT, 9), width=46, height=9, wrap="word",
+                      padx=6, pady=4, cursor="arrow")
+        log.pack(fill="x", padx=1, pady=1)
+        log.tag_configure("head", foreground=DIM, font=(FONT, 8))
+        log.tag_configure("user", foreground=TEXT)
+        log.tag_configure("staff", foreground=GOLD)
+        log.tag_configure("dim", foreground=DIM)
+        log.configure(state="disabled")
+        reply_row = tk.Frame(lp, bg=BG)
+        reply_row.pack(fill="x", pady=(int(6 * k), 0))
+        reply_box = tk.Frame(reply_row, bg=EDGE, padx=1, pady=1)
+        reply_box.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        entry = tk.Entry(reply_box, bg=FIELD, fg=TEXT, insertbackground=GOLD, relief="flat", font=(FONT, 10))
+        entry.pack(fill="x", ipady=4, padx=1)
+        list_msg = tk.Label(lp, text="", bg=BG, fg=DIM, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
+        list_msg.pack(fill="x", pady=(int(4 * k), 0))
+        kinds = dict(FEEDBACK_KINDS)
+
+        def status_of(t):
+            if t.get("unread"):
+                return "● 新回复", BAD
+            if t["status"] == "closed":
+                return "已解决", DIM
+            if t["msgs"][-1]["who"] == "staff":
+                return "已回复", GOOD
+            return "等回复", TEXT
+
+        def row_text(t):
+            label, _ = status_of(t)
+            when = time.strftime("%m-%d", time.localtime(t["created"]))
+            first = " ".join(t["msgs"][0]["text"].split())
+            first = first[:14] + "…" if len(first) > 15 else first
+            # 状态和类型是程序的字（繁体模式换台湾说法）；用户自己写的话只转字形，不换词
+            return "%s · %s" % (i18n.t("%s · %s · %s" % (label, when, kinds.get(t["kind"], "其他").split(" / ")[0])),
+                                i18n.glyph(first))
+
+        def fill_rows():
+            rows.delete(0, "end")
+            for i, t in enumerate(st["tickets"]):
+                rows.insert("end", " " + row_text(t))
+                rows.itemconfigure(i, fg=status_of(t)[1])
+            if len(st["tickets"]) > 5:
+                bar.pack(side="right", fill="y")
+            else:
+                bar.pack_forget()
+
+        def render(t):
+            log.configure(state="normal")
+            log.delete("1.0", "end")
+            log.insert("end", "#%s · %s\n" % (t["id"], i18n.t(kinds.get(t["kind"], "其他"))), "head")
+            for m in t["msgs"]:
+                staff = m["who"] == "staff"
+                when = time.strftime("%m-%d %H:%M", time.localtime(m["at"]))
+                log.insert("end", "%s  %s\n" % ("客服" if staff else "我", when), "head")
+                if staff:                            # 客服的回复：繁体模式和程序的字一样转
+                    log.insert("end", m["text"].strip() + "\n\n", "staff")
+                else:                                # 用户自己写的：只转字形，原话不换词
+                    log.insert("end", i18n.glyph(m["text"].strip()) + "\n\n", ("user", i18n.RAW_TAG))
+            if t["status"] == "closed":
+                log.insert("end", "这条已解决。还有问题可以接着回复，会重新打开。\n", "dim")
+            elif t["msgs"][-1]["who"] == "user":
+                log.insert("end", "我们会在 48 小时内回复这一条。\n", "dim")
+            log.configure(state="disabled")
+            log.see("end")
+
+        def select(index):
+            if not (0 <= index < len(st["tickets"])):
+                return
+            t = st["tickets"][index]
+            st["sel"] = t["id"]
+            rows.selection_clear(0, "end")
+            rows.selection_set(index)
+            rows.see(index)
+            render(t)
+            entry.delete(0, "end")
+            list_msg.configure(text="")
+            if t.get("unread"):                      # 看了这一条才算这一条已读
+                t["unread"] = 0
+                tid = t["id"]
+                threading.Thread(target=lambda: self.relay.ticket_seen(tid), daemon=True).start()
+                self.relay.tickets_unread = sum(int(x.get("unread") or 0) for x in st["tickets"])
+                self.show_ticket_badge()
+                rows.delete(index)
+                rows.insert(index, " " + row_text(t))
+                rows.itemconfigure(index, fg=status_of(t)[1])
+                rows.selection_set(index)
+
+        rows.bind("<<ListboxSelect>>", lambda e: rows.curselection() and select(rows.curselection()[0]))
+
+        def reply():
+            text_ = entry.get().strip()
+            if not text_ or not st["sel"]:
+                return
+            tid = st["sel"]
+            reply_button.set(enabled=False)
+            list_msg.configure(text="正在发送…", fg=DIM)
+            self.background("ticket_replied", lambda: self.relay.ticket_reply(tid, text_) + (win, apply_ticket))
+
+        reply_button = WowButton(reply_row, "回复这一条", reply, width=8)
+        reply_button.pack(side="right")
+        entry.bind("<Return>", lambda e: reply())
+
+        def apply_ticket(ticket, err):
+            reply_button.set(enabled=True)
+            if not ticket:
+                list_msg.configure(text="没发出去：%s" % err, fg=BAD)
+                return
+            for i, t in enumerate(st["tickets"]):
+                if t["id"] == ticket["id"]:
+                    st["tickets"][i] = dict(ticket, unread=0)
+            fill_rows()
+            select(next(i for i, t in enumerate(st["tickets"]) if t["id"] == ticket["id"]))
+            list_msg.configure(text="已发送，我们会在 48 小时内回复这一条。", fg=GOOD)
+
+        def loaded(data, err, select_id=None):
+            if not win.winfo_exists():
+                return
+            if data is None:
+                list_note.configure(text="读取不到之前的反馈：%s" % err, fg=BAD)
+                return
+            st["tickets"] = data.get("tickets") or []
+            n, unread = len(st["tickets"]), sum(int(t.get("unread") or 0) for t in st["tickets"])
+            tab_widgets["list"][0].configure(text="我的反馈（%d）" % n if n else "我的反馈")
+            if not n:
+                list_note.configure(text="还没有提过反馈。有问题点上面的「提新问题」。", fg=DIM)
+                for w in (frame, lf, reply_row):
+                    w.pack_forget()
+                if st["page"] is None:
+                    show("new")
+                return
+            list_note.configure(text="点一条看对话，在下面单独回复这一条。有新回复的排在前面。", fg=DIM)
+            st["tickets"].sort(key=lambda t: (0 if t.get("unread") else 1, -t["updated"]))
+            fill_rows()
+            ids = [t["id"] for t in st["tickets"]]
+            select(ids.index(select_id) if select_id in ids else 0)
+            if st["page"] is None or select_id:
+                show("list")
+
+        # --- 「提新问题」：原来的表单（不要邮箱）---
+        np_ = pages["new"]
+        intro = tk.Label(np_, text="说说遇到的问题或想要的功能。一个问题提一条，方便分别回复。", bg=BG, fg=DIM,
+                         font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
+        intro.pack(fill="x")
+        tk.Label(np_, text="问题类型", bg=BG, fg=TEXT, font=(FONT, 9), anchor="w").pack(fill="x", pady=(8, 2))
         kind = tk.StringVar(value=i18n.t(FEEDBACK_KINDS[0][1]))
-        menu = tk.OptionMenu(body, kind, *[i18n.t(label) for _, label in FEEDBACK_KINDS])
+        menu = tk.OptionMenu(np_, kind, *[i18n.t(label) for _, label in FEEDBACK_KINDS])
         menu.configure(bg=SEC, fg=TEXT, activebackground=SEC_HOVER, activeforeground=WHITE, relief="flat",
                        highlightthickness=1, highlightbackground=EDGE, font=(FONT, 9), anchor="w")
         menu["menu"].configure(bg=SEC, fg=TEXT, activebackground=BTN, activeforeground=WHITE, font=(FONT, 9))
         menu.pack(fill="x")
-        tk.Label(body, text="具体情况（什么时候、在做什么、看到了什么）", bg=BG, fg=TEXT, font=(FONT, 9),
+        tk.Label(np_, text="具体情况（什么时候、在做什么、看到了什么）", bg=BG, fg=TEXT, font=(FONT, 9),
                  anchor="w").pack(fill="x", pady=(8, 2))
-        box = tk.Frame(body, bg=EDGE, padx=1, pady=1)
+        box = tk.Frame(np_, bg=EDGE, padx=1, pady=1)
         box.pack(fill="x")
         text = tk.Text(box, bg=FIELD, fg=TEXT, insertbackground=GOLD, relief="flat", font=(FONT, 10),
-                       width=46, height=6, wrap="word")
+                       width=46, height=7, wrap="word")
         text.pack(fill="x", padx=1, pady=1)
-        contact = None                     # 不再要邮箱：客服在这里（工单里）回复
         with_diag = tk.BooleanVar(value=True)
-        tk.Checkbutton(body, text="附带诊断信息：版本、游戏和插件的连接情况、各频道收到的消息数。不含聊天内容和角色名。",
+        tk.Checkbutton(np_, text="附带诊断信息：版本、游戏和插件的连接情况、各频道收到的消息数。不含聊天内容和角色名。",
                        variable=with_diag, bg=BG, fg=TEXT, selectcolor=FIELD, activebackground=BG,
                        activeforeground=GOLD, font=(FONT, 9), anchor="w", wraplength=wrap,
                        justify="left").pack(fill="x", pady=(8, 0))
-        tk.Label(body, text="我们会在 48 小时内在这里回复你。有回复时，启动器的「反馈问题」会变红，游戏里的翻译页也会提示。",
-                 bg=BG, fg=GOLD, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap).pack(fill="x", pady=(8, 0))
-        msg = tk.Label(body, text="", bg=BG, fg=DIM, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
+        promise = tk.Label(np_, text="我们会在 48 小时内在「我的反馈」里回复你。有回复时，启动器的「反馈问题」会变红，游戏里的翻译页也会提示。",
+                           bg=BG, fg=GOLD, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
+        promise.pack(fill="x", pady=(8, 0))
+        msg = tk.Label(np_, text="", bg=BG, fg=DIM, font=(FONT, 9), anchor="w", justify="left", wraplength=wrap)
         msg.pack(fill="x", pady=(6, 0))
-        row = tk.Frame(body, bg=BG)
+        fit_text(intro, promise, list_note, list_msg, msg)
+        row = tk.Frame(np_, bg=BG)
         row.pack(fill="x", pady=(10, 0))
 
         def send():
@@ -1381,20 +1586,34 @@ class Launcher:
                 payload["diag"] = self.diagnostics()
             send_button.set(enabled=False)
             msg.configure(text="正在发送…", fg=DIM)
-            self.background("feedback_sent", lambda: self.relay.feedback(payload) + (win, msg, send_button))
+            self.background("feedback_sent", lambda: self.relay.feedback(payload) + (win, sent))
+
+        def sent(fid, err):
+            send_button.set(enabled=True)
+            if not fid:
+                msg.configure(text="没发出去：%s" % err, fg=BAD)
+                return
+            text.delete("1.0", "end")
+            msg.configure(text="")
+            for w in (frame, lf, reply_row):                 # 第一条反馈：列表区原来是收起的
+                if not w.winfo_manager():
+                    w.pack(fill="x", before=list_msg)
+            list_msg.configure(text="已收到，编号 %s。我们会在 48 小时内回复这一条。" % fid, fg=GOOD)
+            self.background("tickets_loaded", lambda: self.relay.tickets() + (win, lambda d, e: loaded(d, e, fid)))
 
         send_button = WowButton(row, "发送", send, width=7, primary=True)
         send_button.pack(side="right")
-        WowButton(row, "取消", win.destroy, width=7).pack(side="right", padx=(0, 8))
+        WowButton(row, "关闭", win.destroy, width=7).pack(side="right", padx=(0, 8))
         tk.Label(row, text="网页版：wow.husen.ca/feedback", bg=BG, fg=DIM, font=(FONT, 8),
                  anchor="w").pack(side="left")
-        self.center(win)
-        text.focus_set()
-        self.feedback_win = win
-        self.background("tickets_loaded", lambda: self.relay.tickets() + (win, body, msg))
-        return win, text, contact, msg
 
-    # --- 我的反馈（工单）：客服的回复显示在反馈窗口上方，可以接着回 ---
+        # 有新回复：先停在「我的反馈」；不然先停在「提新问题」，读到以前的反馈后标签上写条数
+        show("list" if getattr(self.relay, "tickets_unread", 0) else "new")
+        self.center(win)
+        self.feedback_win = win
+        self.background("tickets_loaded", lambda: self.relay.tickets() + (win, loaded))
+        return win, text, None, msg
+
     def show_ticket_badge(self):
         link = getattr(self, "feedback_link", None)
         if link is None:
@@ -1402,87 +1621,17 @@ class Launcher:
         n = int(getattr(self.relay, "tickets_unread", 0) or 0)
         link.set_alert(n > 0, "反馈问题 ●%d" % n if n else "反馈问题")
 
-    def on_tickets_loaded(self, data, err, win, body, msg):
-        if not win.winfo_exists() or not data or not data.get("tickets"):
-            return
-        k, wrap = self.k, int(380 * self.k)
-        tickets = data["tickets"]
-        box = tk.Frame(body, bg=BG)
-        box.pack(fill="x", before=body.winfo_children()[1], pady=(0, int(6 * k)))
-        tk.Label(box, text="我的反馈", bg=BG, fg=TEXT, font=(FONT, 10, "bold"), anchor="w").pack(fill="x")
-        frame = tk.Frame(box, bg=EDGE, padx=1, pady=1)
-        frame.pack(fill="x", pady=(2, 0))
-        log = tk.Text(frame, bg=FIELD, fg=TEXT, relief="flat", font=(FONT, 9), width=46, height=8, wrap="word",
-                      padx=6, pady=4, cursor="arrow")
-        log.pack(fill="x", padx=1, pady=1)
-        log.tag_configure("head", foreground=DIM, font=(FONT, 8))
-        log.tag_configure("user", foreground=TEXT)
-        log.tag_configure("staff", foreground=GOLD)
-        log.tag_configure("new", foreground=BAD, font=(FONT, 8, "bold"))
-        kinds = dict(FEEDBACK_KINDS)
-        for t in tickets[:6]:
-            when = time.strftime("%m-%d %H:%M", time.localtime(t["created"]))
-            log.insert("end", "#%s · %s · %s\n" % (t["id"], i18n.t(kinds.get(t["kind"], "其他")), when), "head")
-            for m in t["msgs"]:
-                who = "客服" if m["who"] == "staff" else "我"
-                log.insert("end", "%s：" % who, "staff" if m["who"] == "staff" else "user")
-                log.insert("end", m["text"].strip() + "\n", "staff" if m["who"] == "staff" else "user")
-            if t.get("unread"):
-                log.insert("end", "（新回复）\n", "new")
-            log.insert("end", "\n")
-        log.configure(state="disabled")
-        latest = tickets[0]
-        row = tk.Frame(box, bg=BG)
-        row.pack(fill="x", pady=(4, 0))
-        tk.Label(row, text="接着说（#%s）" % latest["id"], bg=BG, fg=DIM, font=(FONT, 9)).pack(side="left")
-        entry_box = tk.Frame(row, bg=EDGE, padx=1, pady=1)
-        entry_box.pack(side="left", fill="x", expand=True, padx=(6, 6))
-        entry = tk.Entry(entry_box, bg=FIELD, fg=TEXT, insertbackground=GOLD, relief="flat", font=(FONT, 10))
-        entry.pack(fill="x", ipady=3, padx=1)
+    def on_tickets_loaded(self, data, err, win, callback):
+        if win.winfo_exists():
+            callback(data, err)
 
-        def reply():
-            text = entry.get().strip()
-            if not text:
-                return
-            button.set(enabled=False)
-            msg.configure(text="正在发送…", fg=DIM)
-            self.background("ticket_replied", lambda: self.relay.ticket_reply(latest["id"], text) + (win, msg, entry, button, log))
+    def on_ticket_replied(self, ticket, err, win, callback):
+        if win.winfo_exists():
+            callback(ticket, err)
 
-        button = WowButton(row, "回复", reply, width=5)
-        button.pack(side="right")
-        entry.bind("<Return>", lambda e: reply())
-        tk.Frame(box, bg=LINE_SOFT, height=1).pack(fill="x", pady=(int(10 * k), 0))
-        tk.Label(box, text="提新的问题", bg=BG, fg=TEXT, font=(FONT, 10, "bold"), anchor="w").pack(fill="x", pady=(int(6 * k), 0))
-        win.update_idletasks()
-        win.geometry("")
-        if data.get("unread"):
-            threading.Thread(target=self.relay.ticket_seen, daemon=True).start()
-            self.relay.tickets_unread = 0
-            self.show_ticket_badge()
-
-    def on_ticket_replied(self, ticket, err, win, msg, entry, button, log):
-        if not win.winfo_exists():
-            return
-        button.set(enabled=True)
-        if not ticket:
-            msg.configure(text="没发出去：%s" % err, fg=BAD)
-            return
-        m = ticket["msgs"][-1]
-        log.configure(state="normal")
-        log.insert("1.0", "我：%s\n" % m["text"].strip(), "user")
-        log.configure(state="disabled")
-        entry.delete(0, "end")
-        msg.configure(text="已发送，我们会在 48 小时内回复。", fg=GOOD)
-
-    def on_feedback_sent(self, fid, err, win, msg, button):
-        if not win.winfo_exists():
-            return
-        if fid:
-            msg.configure(text="已收到，编号 %s。我们会在 48 小时内在「反馈问题」里回复你。" % fid, fg=GOOD)
-            win.after(4000, win.destroy)
-        else:
-            button.set(enabled=True)
-            msg.configure(text="没发出去：%s" % err, fg=BAD)
+    def on_feedback_sent(self, fid, err, win, callback):
+        if win.winfo_exists():
+            callback(fid, err)
 
     def dialog(self, title):
         k = self.k

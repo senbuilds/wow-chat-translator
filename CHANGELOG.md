@@ -3,6 +3,10 @@
 程序安装包在官网下载：<https://wow.husen.ca>（启动器里点「检查更新」可以直接升级）。游戏插件也在 [CurseForge](https://www.curseforge.com/wow/addons/chatbridge-translator)。
 日期按 UTC。
 
+## 1.4.4（2026-11-28）
+- 反馈窗口分成两页：「我的反馈」列出你提过的每个问题（新回复、已回复、等回复、已解决一眼看清），点哪条就看哪条的对话、单独回复这一条；「提新问题」新开一条。有新回复时打开就停在那一条。
+- The feedback window now has two tabs: "My feedback" lists every ticket with its own conversation and reply box; "New issue" opens a new one.
+
 ## 1.4.3 · 插件 2.12（2026-11-28）
 - 「反馈问题」变成工单：不用再留邮箱。我们会在 48 小时内在这里回复；有回复时，启动器的「反馈问题」会变红，游戏里的翻译页也会提示。看到回复后可以接着说。以前在程序里提交过的反馈也能看到回复。
 - 哪个角色没启用 ChatBridge 插件，启动器会直接说是哪个角色、怎么打开。

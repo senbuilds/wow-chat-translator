@@ -715,11 +715,10 @@ class Relay:
         except Exception:
             return None, "连不上服务器"
 
-    def ticket_seen(self):
-        """看过了：客服回复的未读数清零。"""
+    def ticket_seen(self, tid=None):
+        """看过了：这一条（不给编号 = 全部）客服回复的未读清零。"""
         try:
-            self._request("/tickets/seen", {}, timeout=8)
-            self.tickets_unread = 0
+            self._request("/tickets/seen", {"id": tid} if tid else {}, timeout=8)
         except Exception:
             pass
         return ()
